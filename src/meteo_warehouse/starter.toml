@@ -1,0 +1,608 @@
+# Baseline scope for the public non-commercial warehouse.
+[warehouse]
+version = "baseline-v2"
+geography = ["berlin", "helgoland", "oslo"]
+reference_history_start = 2023-01-01
+reference_history_end = 2026-01-01
+retention = "retain raw evidence, revisions, and published manifests"
+
+[job_groups]
+live = ["forecast", "forecast_extended", "current", "minutely", "ensemble", "seasonal", "marine", "air_quality"]
+backfill = ["archive", "archive_daily", "historical_forecast", "previous_runs", "climate", "satellite", "flood"]
+reference = ["geocoding", "elevation"]
+
+[benchmark]
+trials = 20
+daily_start = 2025-12-25
+daily_end = 2026-01-01
+history_product = "archive"
+history_start = 2023-01-01T00:00:00Z
+history_end = 2026-01-01T00:00:00Z
+
+[profiles.utc_hourly]
+timezone = "UTC"
+params = { timeformat = "unixtime" }
+
+[profiles.berlin_calendar]
+timezone = "Europe/Berlin"
+params = { timeformat = "iso8601" }
+
+[sites.berlin]
+latitude = 52.52
+longitude = 13.405
+display_name = "Berlin"
+
+[products.forecast]
+category = "weather_forecast"
+url = "https://api.open-meteo.com/v1/forecast"
+vintage = "capture"
+provider = "dwd"
+request_limits = { max_locations = 3, max_fields = 10, max_days = 2 }
+
+[products.historical_forecast]
+category = "weather_forecast"
+url = "https://historical-forecast-api.open-meteo.com/v1/forecast"
+vintage = "archive"
+
+[products.single_runs]
+category = "weather_forecast"
+url = "https://single-runs-api.open-meteo.com/v1/forecast"
+vintage = "exact_run"
+provider = "dwd"
+default_response_days = 7
+request_limits = { max_locations = 3, max_fields = 10, max_days = 7 }
+
+[products.previous_runs]
+category = "weather_forecast"
+url = "https://previous-runs-api.open-meteo.com/v1/forecast"
+vintage = "archive"
+
+[products.archive]
+category = "historical_weather"
+url = "https://archive-api.open-meteo.com/v1/archive"
+vintage = "archive"
+provider = "ecmwf"
+request_limits = { max_locations = 3, max_fields = 10, max_days = 14 }
+
+[products.ensemble]
+category = "ensemble_models"
+url = "https://ensemble-api.open-meteo.com/v1/ensemble"
+vintage = "capture"
+provider = "dwd"
+
+[products.seasonal]
+category = "seasonal_forecast"
+url = "https://seasonal-api.open-meteo.com/v1/seasonal"
+vintage = "capture"
+
+[products.climate]
+category = "climate_change"
+url = "https://climate-api.open-meteo.com/v1/climate"
+vintage = "archive"
+timezone_param = false
+
+[products.marine]
+category = "marine_forecast"
+url = "https://marine-api.open-meteo.com/v1/marine"
+vintage = "capture"
+
+[products.air_quality]
+category = "air_quality"
+url = "https://air-quality-api.open-meteo.com/v1/air-quality"
+vintage = "capture"
+selector_param = "domains"
+request_limits = { max_locations = 3, max_fields = 10, max_days = 7 }
+
+[products.satellite]
+category = "satellite_radiation"
+url = "https://satellite-api.open-meteo.com/v1/archive"
+vintage = "archive"
+
+[products.flood]
+category = "flood"
+url = "https://flood-api.open-meteo.com/v1/flood"
+vintage = "archive"
+
+[products.geocoding]
+category = "geocoding"
+url = "https://geocoding-api.open-meteo.com/v1/search"
+vintage = "archive"
+
+[products.elevation]
+category = "elevation"
+url = "https://api.open-meteo.com/v1/elevation"
+vintage = "archive"
+
+[models.icon_d2]
+code = "dwd_icon_d2_native"
+domain = "central_europe"
+provider = "dwd"
+metadata_url = "https://api.open-meteo.com/data/dwd_icon_d2_native/static/meta.json"
+
+[fields.temperature_2m]
+unit = "°C"
+quantity = "temperature"
+vertical_kind = "height"
+level_from = 2
+level_unit = "m"
+statistic = "instantaneous"
+plausible_min = -100
+plausible_max = 65
+
+[fields.temperature_2m_min]
+unit = "°C"
+quantity = "temperature"
+vertical_kind = "height"
+level_from = 2
+level_unit = "m"
+statistic = "minimum"
+window = "calendar"
+daily_time_basis = "fixed_offset"
+
+[fields.temperature_2m_max]
+unit = "°C"
+quantity = "temperature"
+vertical_kind = "height"
+level_from = 2
+level_unit = "m"
+statistic = "maximum"
+window = "calendar"
+daily_time_basis = "fixed_offset"
+
+[fields.precipitation]
+unit = "mm"
+statistic = "sum"
+window = "preceding"
+min = 0
+
+[fields.wind_speed_10m]
+unit = "m/s"
+quantity = "wind_speed"
+vertical_kind = "height"
+level_from = 10
+level_unit = "m"
+statistic = "instantaneous"
+min = 0
+
+[fields.wind_gusts_10m]
+unit = "m/s"
+quantity = "wind_gust"
+vertical_kind = "height"
+level_from = 10
+level_unit = "m"
+statistic = "maximum"
+window = "preceding"
+min = 0
+
+[fields.pm2_5]
+unit = "μg/m³"
+conversions = {"µg/m³" = [1, 0]}
+statistic = "instantaneous"
+min = 0
+
+[fields.temperature_2m_previous_day1]
+measure_code = "temperature_2m"
+unit = "°C"
+quantity = "temperature"
+vertical_kind = "height"
+level_from = 2
+level_unit = "m"
+statistic = "instantaneous"
+plausible_min = -100
+plausible_max = 65
+fixed_lead_hours = 24
+
+[jobs.forecast]
+product = "forecast"
+mode = "live"
+model = "icon_d2"
+selector = "dwd_icon_d2_native"
+selector_kind = "model"
+domain = "central_europe"
+sites = ["berlin"]
+block = "hourly"
+hours = 24
+capability_defaults = { horizon_hours = 48, horizon_reference = "trigger_run" }
+fields = ["temperature_2m", "precipitation", "wind_speed_10m"]
+request_profile = "utc_hourly"
+
+[jobs.single_runs]
+product = "single_runs"
+mode = "exact"
+model = "icon_d2"
+selector = "dwd_icon_d2_native"
+selector_kind = "model"
+domain = "central_europe"
+sites = ["berlin"]
+block = "hourly"
+hours = 24
+first_lead_hours = 1
+capability_defaults = { horizon_hours = 48, horizon_reference = "run" }
+fields = ["temperature_2m", "precipitation", "wind_speed_10m"]
+request_profile = "utc_hourly"
+
+[jobs.ensemble]
+product = "ensemble"
+mode = "live"
+selector = "dwd_icon_d2_eps_native"
+selector_kind = "model"
+domain = "central_europe"
+sites = ["berlin"]
+block = "hourly"
+hours = 24
+fields = ["temperature_2m"]
+request_profile = "utc_hourly"
+field_overrides.temperature_2m = { member_kind = "member", control_member = 0, members = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19] }
+
+[jobs.archive]
+product = "archive"
+mode = "archive"
+selector = "era5"
+selector_kind = "model"
+sites = ["berlin", "helgoland", "oslo"]
+block = "hourly"
+start = 2022-12-31T23:00:00Z
+end = 2026-01-01T01:00:00Z
+fields = ["temperature_2m", "precipitation", "wind_gusts_10m"]
+request_profile = "utc_hourly"
+
+[jobs.archive_daily]
+product = "archive"
+mode = "archive"
+selector = "era5"
+selector_kind = "model"
+sites = ["berlin", "helgoland", "oslo"]
+block = "daily"
+request_profile = "berlin_calendar"
+start = 2023-01-01
+end = 2026-01-01
+fields = ["temperature_2m_min", "temperature_2m_max"]
+
+[jobs.previous_runs]
+product = "previous_runs"
+mode = "archive"
+selector = "dwd_icon_d2_native"
+selector_kind = "model"
+sites = ["berlin"]
+block = "hourly"
+start = 2026-11-12T00:00:00Z
+end = 2026-11-13T00:00:00Z
+fields = ["temperature_2m_previous_day1"]
+request_profile = "utc_hourly"
+window_params = "date"
+
+[jobs.air_quality]
+product = "air_quality"
+mode = "live"
+sites = ["berlin"]
+block = "hourly"
+hours = 24
+fields = ["pm2_5", "pm10", "nitrogen_dioxide", "ozone"]
+request_profile = "utc_hourly"
+
+[jobs.geocoding]
+product = "geocoding"
+mode = "live"
+params = { name = "Berlin", count = 5, language = "en", countryCode = "DE" }
+
+[jobs.elevation]
+product = "elevation"
+mode = "live"
+sites = ["berlin", "helgoland", "oslo"]
+
+[contracts.forecast]
+kind = "forecast"
+version = "v2"
+job = "forecast"
+site = "berlin"
+hours = 24
+required = ["temp_2m_c", "precip_mm", "wind_10m_ms"]
+metrics.temp_2m_c = { measure = "temperature_2m", unit = "°C" }
+metrics.precip_mm = { measure = "precipitation", unit = "mm", before = 3600 }
+metrics.wind_10m_ms = { measure = "wind_speed_10m", unit = "m/s" }
+
+[contracts.single_run_forecast]
+kind = "forecast"
+version = "v2"
+job = "single_runs"
+site = "berlin"
+hours = 24
+required = ["temp_2m_c", "precip_mm", "wind_10m_ms"]
+metrics.temp_2m_c = { measure = "temperature_2m", unit = "°C" }
+metrics.precip_mm = { measure = "precipitation", unit = "mm", before = 3600 }
+metrics.wind_10m_ms = { measure = "wind_speed_10m", unit = "m/s" }
+
+[contracts.ensemble]
+kind = "ensemble"
+version = "v2"
+job = "ensemble"
+site = "berlin"
+hours = 24
+metrics.temperature_2m = { measure = "temperature_2m", unit = "°C", members = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19] }
+
+[contracts.weather_daily]
+kind = "weather_daily"
+version = "v2"
+job = "archive"
+site = "berlin"
+timezone = "Europe/Berlin"
+reporting_start = 2023-01-01
+reporting_end = 2026-01-01
+metrics.temp_min_c = { measure = "temperature_2m", unit = "°C", reduce = "min", provider = { job = "archive_daily", measure = "temperature_2m_min" } }
+metrics.temp_max_c = { measure = "temperature_2m", unit = "°C", reduce = "max", provider = { job = "archive_daily", measure = "temperature_2m_max" } }
+metrics.precip_mm = { measure = "precipitation", unit = "mm", before = 3600, reduce = "sum" }
+metrics.wind_gust_max_ms = { measure = "wind_gusts_10m", unit = "m/s", before = 3600, reduce = "max" }
+
+[contracts.weather_provider_daily]
+kind = "weather_daily"
+version = "provider-v2"
+job = "archive_daily"
+site = "berlin"
+timezone = "Europe/Berlin"
+reporting_start = 2023-01-01
+reporting_end = 2026-01-01
+metrics.temp_min_c = { measure = "temperature_2m_min", unit = "°C", block = "daily", reduce = "min" }
+metrics.temp_max_c = { measure = "temperature_2m_max", unit = "°C", block = "daily", reduce = "max" }
+
+[contracts.environment_daily]
+kind = "environment_daily"
+version = "v2"
+job = "air_quality"
+site = "berlin"
+timezone = "Europe/Berlin"
+metrics.pm2_5 = { measure = "pm2_5", unit = "μg/m³", reduce = "avg" }
+
+[contracts.training]
+kind = "ml"
+version = "v2"
+job = "forecast"
+site = "berlin"
+feature_set_version = "weather-features-v2"
+label_set_version = "era5-temperature-2m-v1"
+label_job = "archive"
+release_contract = "forecast"
+required = ["forecast_temp_c", "forecast_precip_mm"]
+metrics.forecast_temp_c = { measure = "temperature_2m", unit = "°C" }
+metrics.forecast_precip_mm = { measure = "precipitation", unit = "mm", before = 3600 }
+rolling.forecast_precip_3h_mm = { measure = "precipitation", unit = "mm", before = 3600, reduce = "sum", hours = 3 }
+rolling.forecast_temp_mean_3h_c = { measure = "temperature_2m", unit = "°C", reduce = "avg", hours = 3 }
+label = { measure = "temperature_2m", unit = "°C" }
+
+[sites.helgoland]
+latitude = 54.174
+longitude = 7.89
+display_name = "Helgoland coast"
+
+[sites.oslo]
+latitude = 59.9
+longitude = 10.75
+display_name = "Oslo"
+
+[fields.seasonal_temperature_2m_max]
+api_field = "temperature_2m_max"
+measure_code = "temperature_2m_max"
+quantity = "temperature"
+vertical_kind = "height"
+level_from = 2
+level_unit = "m"
+unit = "°C"
+statistic = "maximum"
+window = "calendar"
+daily_time_basis = "fixed_offset"
+member_kind = "member"
+control_member = 0
+
+[fields.wave_height]
+unit = "m"
+statistic = "instantaneous"
+min = 0
+
+[fields.shortwave_radiation]
+unit = "W/m²"
+statistic = "mean"
+window = "preceding"
+min = 0
+
+[fields.river_discharge]
+unit = "m³/s"
+statistic = "mean"
+window = "calendar"
+min = 0
+
+[fields.weather_code]
+unit = "wmo code"
+type = "code"
+statistic = "instantaneous"
+
+[fields.temperature_850hPa]
+unit = "°C"
+quantity = "temperature"
+vertical_kind = "pressure"
+level_from = 850
+level_unit = "hPa"
+statistic = "instantaneous"
+
+[jobs.current]
+product = "forecast"
+mode = "live"
+selector = "dwd_icon_d2_native"
+selector_kind = "model"
+sites = ["berlin"]
+block = "current"
+fields = ["temperature_2m", "wind_speed_10m"]
+
+[jobs.minutely]
+product = "forecast"
+mode = "live"
+selector = "dwd_icon_d2_native"
+selector_kind = "model"
+sites = ["berlin"]
+block = "minutely_15"
+hours = 6
+fields = ["temperature_2m", "precipitation", "shortwave_radiation"]
+
+[jobs.historical_forecast]
+product = "historical_forecast"
+mode = "archive"
+selector = "dwd_icon_d2"
+selector_kind = "model"
+sites = ["berlin"]
+block = "hourly"
+start = 2025-07-21T00:00:00Z
+end = 2025-07-22T00:00:00Z
+fields = ["temperature_2m", "weather_code", "temperature_850hPa"]
+window_params = "date"
+
+[jobs.seasonal]
+product = "seasonal"
+mode = "live"
+sites = ["berlin"]
+block = "daily"
+start_day_offset = 0
+days = 7
+fields = ["seasonal_temperature_2m_max"]
+params = { forecast_days = 7 }
+window_params = "relative"
+
+[jobs.climate]
+product = "climate"
+mode = "archive"
+selector = "EC_Earth3P_HR"
+selector_kind = "model"
+sites = ["berlin"]
+block = "daily"
+start = 2040-07-21
+end = 2040-07-24
+fields = ["temperature_2m_min", "temperature_2m_max"]
+
+[jobs.marine]
+product = "marine"
+mode = "live"
+sites = ["helgoland"]
+block = "hourly"
+hours = 24
+fields = ["wave_height"]
+
+[jobs.satellite]
+product = "satellite"
+mode = "archive"
+selector = "satellite_radiation_seamless"
+selector_kind = "blend"
+sites = ["berlin"]
+block = "hourly"
+start = 2026-11-13T00:00:00Z
+end = 2026-11-14T00:00:00Z
+fields = ["shortwave_radiation"]
+window_params = "date"
+
+[jobs.flood]
+product = "flood"
+mode = "archive"
+selector = "consolidated_v4"
+selector_kind = "model"
+sites = ["oslo"]
+block = "daily"
+start = 2024-04-21
+end = 2024-04-24
+fields = ["river_discharge"]
+
+[contracts.weather_daily_helgoland]
+kind = "weather_daily"
+version = "v2"
+job = "archive"
+site = "helgoland"
+timezone = "Europe/Berlin"
+reporting_start = 2023-01-01
+reporting_end = 2026-01-01
+metrics.temp_min_c = { measure = "temperature_2m", unit = "°C", reduce = "min", provider = { job = "archive_daily", measure = "temperature_2m_min" } }
+metrics.temp_max_c = { measure = "temperature_2m", unit = "°C", reduce = "max", provider = { job = "archive_daily", measure = "temperature_2m_max" } }
+metrics.precip_mm = { measure = "precipitation", unit = "mm", before = 3600, reduce = "sum" }
+metrics.wind_gust_max_ms = { measure = "wind_gusts_10m", unit = "m/s", before = 3600, reduce = "max" }
+
+[contracts.weather_daily_oslo]
+kind = "weather_daily"
+version = "v2"
+job = "archive"
+site = "oslo"
+timezone = "Europe/Oslo"
+reporting_start = 2023-01-01
+reporting_end = 2026-01-01
+metrics.temp_min_c = { measure = "temperature_2m", unit = "°C", reduce = "min", provider = { job = "archive_daily", measure = "temperature_2m_min" } }
+metrics.temp_max_c = { measure = "temperature_2m", unit = "°C", reduce = "max", provider = { job = "archive_daily", measure = "temperature_2m_max" } }
+metrics.precip_mm = { measure = "precipitation", unit = "mm", before = 3600, reduce = "sum" }
+metrics.wind_gust_max_ms = { measure = "wind_gusts_10m", unit = "m/s", before = 3600, reduce = "max" }
+
+
+[fields.relative_humidity_2m]
+unit = "%"
+vertical_kind = "height"
+level_from = 2
+level_unit = "m"
+statistic = "instantaneous"
+min = 0
+max = 100
+
+[fields.dew_point_2m]
+unit = "°C"
+vertical_kind = "height"
+level_from = 2
+level_unit = "m"
+statistic = "instantaneous"
+
+[fields.surface_pressure]
+unit = "hPa"
+statistic = "instantaneous"
+min = 0
+
+[fields.cloud_cover]
+unit = "%"
+statistic = "instantaneous"
+min = 0
+max = 100
+
+[fields.wind_direction_10m]
+unit = "°"
+vertical_kind = "height"
+level_from = 10
+level_unit = "m"
+statistic = "instantaneous"
+min = 0
+max = 360
+
+[fields.global_tilted_irradiance]
+unit = "W/m²"
+statistic = "mean"
+window = "preceding"
+min = 0
+
+[fields.pm10]
+unit = "μg/m³"
+conversions = {"µg/m³" = [1, 0]}
+statistic = "instantaneous"
+min = 0
+
+[fields.nitrogen_dioxide]
+unit = "μg/m³"
+conversions = {"µg/m³" = [1, 0]}
+statistic = "instantaneous"
+min = 0
+
+[fields.ozone]
+unit = "μg/m³"
+conversions = {"µg/m³" = [1, 0]}
+statistic = "instantaneous"
+min = 0
+
+[jobs.forecast_extended]
+product = "forecast"
+mode = "live"
+model = "icon_d2"
+selector = "dwd_icon_d2_native"
+selector_kind = "model"
+domain = "central_europe"
+sites = ["berlin"]
+block = "hourly"
+hours = 24
+request_profile = "utc_hourly"
+params = { tilt = 30, azimuth = 0 }
+fields = ["relative_humidity_2m", "dew_point_2m", "surface_pressure", "cloud_cover", "wind_direction_10m", "global_tilted_irradiance", "weather_code"]
