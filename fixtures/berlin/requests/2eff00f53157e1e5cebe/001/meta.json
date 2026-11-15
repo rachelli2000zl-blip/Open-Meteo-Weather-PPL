@@ -1,0 +1,15 @@
+{
+  "attempt": 1,
+  "body_bytes": 3592,
+  "complete": true,
+  "duration_ms": 1245,
+  "error": null,
+  "fetched_at_utc": "2026-11-15T07:49:23.064061+00:00",
+  "headers": {
+    "content-type": "application/json; charset=utf-8",
+    "date": "Sun, 15 Nov 2026 07:49:22 GMT"
+  },
+  "http_status": 200,
+  "retryable": false,
+  "sha256": "4044a4036232187989847c8dd3ebd363900fd730ae337ab9dac42357bde61d9d"
+}

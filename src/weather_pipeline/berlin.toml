@@ -1,0 +1,26 @@
+site_id = "berlin"
+latitude = 52.52
+longitude = 13.405
+timezone = "Europe/Berlin"
+forecast_hours = 24
+archive_start = 2025-07-21
+archive_end = 2025-07-27
+
+[forecast]
+url = "https://api.open-meteo.com/v1/forecast"
+model = "dwd_icon_d2_native"
+section = "hourly"
+fields = ["temperature_2m"]
+
+[ensemble]
+url = "https://ensemble-api.open-meteo.com/v1/ensemble"
+model = "dwd_icon_d2_eps_native"
+section = "hourly"
+fields = ["temperature_2m"]
+members = 20
+
+[archive]
+url = "https://archive-api.open-meteo.com/v1/archive"
+model = "era5"
+section = "daily"
+fields = ["temperature_2m_min", "temperature_2m_max"]

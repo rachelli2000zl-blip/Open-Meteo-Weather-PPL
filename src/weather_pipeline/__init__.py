@@ -1,0 +1,1 @@
+"""Local Berlin weather pipeline."""
