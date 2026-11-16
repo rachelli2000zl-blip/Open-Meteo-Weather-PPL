@@ -1,11 +1,10 @@
-import hashlib
 import json
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, timedelta
 from zoneinfo import ZoneInfo
 
+from .contract_fingerprint import fingerprints_match, implementation_fingerprint
 from .db import PACKAGE, digest, insert, insert_many, instant, json_text, key, now, transaction
 from .plan import NO_SELECTOR, local_midnight, profile_data, resolve_job
-
 
 FORECAST_COLUMNS = ("temp_2m_c", "precip_mm", "wind_10m_ms")
 WEATHER_COLUMNS = ("temp_min_c", "temp_max_c", "precip_mm", "wind_gust_max_ms")
@@ -17,10 +16,17 @@ def scope_for(config, job_name, site):
     if site not in job["sites"]:
         raise ValueError(f"Location {site} is outside the job's scope")
     block = job.get("block")
-    profile = profile_data(job.get("params", {}) | {"timezone": job.get("timezone", "UTC")},
-                           job.get("profile"), calendar=block in {"daily", "weekly", "monthly"})
-    return [key(["site", site]), key(["product", job["product"]]),
-            job.get("selector", NO_SELECTOR), key(["profile", profile])]
+    profile = profile_data(
+        job.get("params", {}) | {"timezone": job.get("timezone", "UTC")},
+        job.get("profile"),
+        calendar=block in {"daily", "weekly", "monthly"},
+    )
+    return [
+        key(["site", site]),
+        key(["product", job["product"]]),
+        job.get("selector", NO_SELECTOR),
+        key(["profile", profile]),
+    ]
 
 
 def gold_contract(db, config, name):
@@ -46,14 +52,17 @@ def gold_contract(db, config, name):
             if release["kind"] != "forecast" or scope != scope_for(config, release["job"], release["site"]):
                 raise ValueError("The release contract must publish the feature scope")
             pinned["release_version"] = release["version"]
-    sql_hash = hashlib.sha256(PACKAGE.joinpath("gold.py").read_bytes()).hexdigest()
-    prior = db.execute("""
+    sql_hash = implementation_fingerprint(PACKAGE.joinpath("gold.py").read_text(encoding="utf-8"))
+    prior = db.execute(
+        """
         SELECT selection_rules, sql_sha256 FROM ops.gold_contract
         WHERE contract_name = ? AND contract_version = ?
-    """, [name, contract["version"]]).fetchone()
+    """,
+        [name, contract["version"]],
+    ).fetchone()
     if prior is None:
         insert(db, "ops.gold_contract", [name, contract["version"], json_text(pinned), sql_hash])
-    elif json.loads(prior[0]) != json.loads(json_text(pinned)) or prior[1] != sql_hash:
+    elif json.loads(prior[0]) != json.loads(json_text(pinned)) or not fingerprints_match(prior[1], sql_hash):
         raise ValueError(f"Bump contract {name}'s version before changing its definition or SQL")
     return pinned
 
@@ -62,27 +71,46 @@ def build_record(db, name, contract, params, output, manifest, cutoff, quality):
     identity = digest([name, contract, params, output, manifest])
     if db.execute("SELECT 1 FROM ops.gold_build WHERE build_id = ?", [identity]).fetchone():
         return identity, False
-    insert(db, "ops.gold_build", [
-        identity, name, contract["version"], cutoff, "0.2.0", digest(contract),
-        json_text([contract["scope"]]), json_text({"rows": len(output)}), json_text(quality), now()])
+    insert(
+        db,
+        "ops.gold_build",
+        [
+            identity,
+            name,
+            contract["version"],
+            cutoff,
+            "0.2.0",
+            digest(contract),
+            json_text([contract["scope"]]),
+            json_text({"rows": len(output)}),
+            json_text(quality),
+            now(),
+        ],
+    )
     insert_many(db, "ops.gold_build_input", [(identity, *row) for row in manifest])
     return identity, True
 
 
 def manifest_from(db, *tables):
-    return db.execute(" UNION ".join(
-        f"SELECT DISTINCT series_id, vintage_id, valid_at, revision_no FROM {table} WHERE series_id IS NOT NULL"
-        for table in tables) + " ORDER BY 1, 2, 3, 4").fetchall()
+    return db.execute(
+        " UNION ".join(
+            f"SELECT DISTINCT series_id, vintage_id, valid_at, revision_no FROM {table} WHERE series_id IS NOT NULL"
+            for table in tables
+        )
+        + " ORDER BY 1, 2, 3, 4"
+    ).fetchall()
 
 
 def scope_filter(alias="f"):
-    return " AND ".join(f"{alias}.{column} = ?" for column in
-                        ("site_id", "product_id", "requested_model_selector", "profile_id"))
+    return " AND ".join(
+        f"{alias}.{column} = ?" for column in ("site_id", "product_id", "requested_model_selector", "profile_id")
+    )
 
 
 def scope_join(left, right):
-    return " AND ".join(f"{left}.{col} = {right}.{col}" for col in
-                        ("site_id", "product_id", "requested_model_selector", "profile_id"))
+    return " AND ".join(
+        f"{left}.{col} = {right}.{col}" for col in ("site_id", "product_id", "requested_model_selector", "profile_id")
+    )
 
 
 def metrics_stage(db, contract, columns=None):
@@ -103,21 +131,41 @@ def metrics_stage(db, contract, columns=None):
         lookback = spec.get("hours", 1)
         if code in rolling and (type(lookback) is not int or lookback < 2 or spec.get("block", "hourly") != "hourly"):
             raise ValueError(f"Rolling input {code} requires an hourly measure and at least two hours")
-        if (reducer not in {"min", "max", "sum", "avg"} or before < 0 or after < 0 or (before and after)
-                or spec.get("block", "hourly") not in {"daily", "hourly"}):
+        if (
+            reducer not in {"min", "max", "sum", "avg"}
+            or before < 0
+            or after < 0
+            or (before and after)
+            or spec.get("block", "hourly") not in {"daily", "hourly"}
+        ):
             raise ValueError(f"Invalid interval or aggregation for {code}")
         if spec.get("members") is not None and (
-                not spec["members"] or len(set(spec["members"])) != len(spec["members"])):
+            not spec["members"] or len(set(spec["members"])) != len(spec["members"])
+        ):
             raise ValueError(f"Expected member roster must identify distinct members for {code}")
         if contract["kind"] in {"weather_daily", "environment_daily"} and (
-                spec.get("block", "hourly") == "hourly"
-                and before + after != (3600 if reducer == "sum" else before + after)
-                or spec.get("block", "hourly") == "hourly" and (before not in {0, 3600} or after not in {0, 3600})):
+            spec.get("block", "hourly") == "hourly"
+            and before + after != (3600 if reducer == "sum" else before + after)
+            or spec.get("block", "hourly") == "hourly"
+            and (before not in {0, 3600} or after not in {0, 3600})
+        ):
             raise ValueError("Daily sums require full non-overlapping hourly intervals")
-        result.append((code, spec["measure"], spec.get("definition_version", 1), spec["unit"],
-                       spec.get("block", "hourly"),
-                       before, after, reducer, code in required, spec.get("members"),
-                       spec.get("allow_flagged", False), lookback if code in rolling else 1))
+        result.append(
+            (
+                code,
+                spec["measure"],
+                spec.get("definition_version", 1),
+                spec["unit"],
+                spec.get("block", "hourly"),
+                before,
+                after,
+                reducer,
+                code in required,
+                spec.get("members"),
+                spec.get("allow_flagged", False),
+                lookback if code in rolling else 1,
+            )
+        )
     db.execute("""
         CREATE OR REPLACE TEMP TABLE g_metric (
             metric VARCHAR PRIMARY KEY, measure_code VARCHAR, definition_version INTEGER, unit VARCHAR,
@@ -132,10 +180,13 @@ def hour_grid(db, start, end):
     start, end = instant(start), instant(end)
     if end <= start or any(value.minute or value.second or value.microsecond for value in (start, end)):
         raise ValueError("Use a half-open UTC hour-aligned window")
-    db.execute("""
+    db.execute(
+        """
         CREATE OR REPLACE TEMP TABLE g_hour AS
         SELECT range AS valid_at FROM range(?::TIMESTAMPTZ, ?::TIMESTAMPTZ, INTERVAL '1 hour')
-    """, [start, end])
+    """,
+        [start, end],
+    )
     return start, end
 
 
@@ -166,7 +217,8 @@ def pivot(columns, alias=""):
 def create_forecast_candidates(db, contract, cutoff):
     member = contract["kind"] == "ensemble"
     valid_members = "(m.roster IS NULL OR list_contains(m.roster, f.member_number))" if member else "true"
-    db.execute(f"""
+    db.execute(
+        f"""
         CREATE OR REPLACE TEMP TABLE g_candidates AS
         WITH visible AS (
             SELECT f.*, m.metric, m.required, {usable()} AS usable, {interval_join()} AS aligned
@@ -180,7 +232,9 @@ def create_forecast_candidates(db, contract, cutoff):
         )
         SELECT * FROM visible WHERE aligned
         QUALIFY count(*) OVER (PARTITION BY vintage_id, valid_at, metric, member_number) = 1
-    """, [*contract["scope"], cutoff, "member" if member else "deterministic"])
+    """,
+        [*contract["scope"], cutoff, "member" if member else "deterministic"],
+    )
 
 
 def forecast(db, name, contract, start, end, cutoff):
@@ -191,7 +245,8 @@ def forecast(db, name, contract, start, end, cutoff):
     ensemble = contract["kind"] == "ensemble"
     metrics_stage(db, contract, None if ensemble else FORECAST_COLUMNS)
     create_forecast_candidates(db, contract, cutoff)
-    ranked = db.execute("""
+    ranked = db.execute(
+        """
         SELECT vintage_id, max(initialized_at), max(captured_at)
         FROM g_candidates
         GROUP BY vintage_id
@@ -201,16 +256,21 @@ def forecast(db, name, contract, start, end, cutoff):
              AND count(*) FILTER (WHERE usable) > 0) END
         ORDER BY max(coalesce(initialized_at, captured_at)) DESC, max(warehouse_available_at) DESC, vintage_id DESC
         LIMIT 1
-    """, [ensemble]).fetchone()
+    """,
+        [ensemble],
+    ).fetchone()
     if not ranked:
         return {"status": "ineligible", "release_id": None}
     vintage, initialized, captured = ranked
-    db.execute("""
+    db.execute(
+        """
         CREATE OR REPLACE TEMP TABLE g_selected AS
         SELECT * FROM g_candidates WHERE vintage_id = ? AND (? OR usable)
-    """, [vintage, ensemble])
+    """,
+        [vintage, ensemble],
+    )
     if ensemble:
-        output = db.execute(f"""
+        output = db.execute("""
             WITH settings AS (
                 SELECT g_metric.*, measure_id FROM g_metric
                 JOIN silver.measure USING (measure_code, definition_version)
@@ -243,54 +303,83 @@ def forecast(db, name, contract, start, end, cutoff):
         return {"status": "unchanged", "release_id": release_id}
     scope = contract["scope"]
     if not ensemble:
-        prior = db.execute(f"""
+        prior = db.execute(
+            f"""
             SELECT r.window_start, coalesce(r.initialized_at, v.captured_at)
             FROM gold.forecast_hourly_latest f JOIN gold.forecast_release r USING (release_id)
             JOIN silver.vintage v ON r.vintage_id = v.vintage_id
             WHERE f.contract_version = ? AND {scope_filter()}
             LIMIT 1
-        """, [contract["version"], *scope]).fetchone()
+        """,
+            [contract["version"], *scope],
+        ).fetchone()
         if prior and (start < prior[0] or (initialized or captured) < prior[1]):
             return {"status": "superseded", "release_id": None}
-    build_id, _ = build_record(db, name, contract, [start, end], output, manifest, cutoff,
-                               {"coverage": coverage})
+    build_id, _ = build_record(db, name, contract, [start, end], output, manifest, cutoff, {"coverage": coverage})
     required_at = db.execute("SELECT max(warehouse_available_at) FROM g_selected").fetchone()[0]
-    insert(db, "gold.forecast_release", [
-        release_id, contract["version"], *scope, start, end, vintage, initialized, required_at,
-        max(now(), required_at), coverage, build_id])
+    insert(
+        db,
+        "gold.forecast_release",
+        [
+            release_id,
+            contract["version"],
+            *scope,
+            start,
+            end,
+            vintage,
+            initialized,
+            required_at,
+            max(now(), required_at),
+            coverage,
+            build_id,
+        ],
+    )
     insert_many(db, "gold.release_input", [(release_id, *row) for row in manifest])
     if ensemble:
         insert_many(db, "gold.ensemble_hourly", [(release_id, *row) for row in output])
     else:
         scope_sql = scope_filter("gold.forecast_hourly_latest")
-        db.execute(f"DELETE FROM gold.forecast_hourly_latest WHERE contract_version = ? AND {scope_sql}",
-                   [contract["version"], *scope])
-        insert_many(db, "gold.forecast_hourly_latest", [
-            (contract["version"], *scope, at, release_id, temp, precip, wind, coverage)
-            for at, temp, precip, wind in output])
+        db.execute(
+            f"DELETE FROM gold.forecast_hourly_latest WHERE contract_version = ? AND {scope_sql}",
+            [contract["version"], *scope],
+        )
+        insert_many(
+            db,
+            "gold.forecast_hourly_latest",
+            [
+                (contract["version"], *scope, at, release_id, temp, precip, wind, coverage)
+                for at, temp, precip, wind in output
+            ],
+        )
     return {"status": "published", "release_id": release_id, "rows": len(output)}
 
 
 def daily_sources_stage(db, contract, weather):
     metrics_stage(db, contract, WEATHER_COLUMNS if weather else None)
-    db.execute("""
+    db.execute(
+        """
         CREATE OR REPLACE TEMP TABLE g_report_source AS
         SELECT *, 0 AS source_rank,
                CASE WHEN block_code = 'daily' THEN 'provider_daily' ELSE 'hourly' END AS report_source,
                ?::BIGINT AS site_id, ?::BIGINT AS product_id, ?::VARCHAR AS requested_model_selector,
                ?::BIGINT AS profile_id
         FROM g_metric
-    """, contract["scope"])
+    """,
+        contract["scope"],
+    )
     for code, scope in contract.get("provider_scopes", {}).items():
         provider = contract["metrics"][code]["provider"]
-        db.execute("""
+        db.execute(
+            """
             INSERT INTO g_report_source BY NAME
             SELECT * REPLACE (? AS measure_code, ? AS definition_version, 'daily' AS block_code,
                              0 AS seconds_before, 0 AS seconds_after, 1 AS source_rank,
                              'provider_daily' AS report_source, ? AS site_id, ? AS product_id,
                              ? AS requested_model_selector, ? AS profile_id)
             FROM g_report_source WHERE metric = ? AND source_rank = 0
-        """, [provider["measure"], provider.get("definition_version", 1), *scope, code])
+        """,
+            [provider["measure"], provider.get("definition_version", 1), *scope, code],
+        )
 
 
 def daily(db, name, contract, start, end, cutoff):
@@ -311,7 +400,8 @@ def daily(db, name, contract, start, end, cutoff):
         CREATE OR REPLACE TEMP TABLE g_day (local_date DATE, day_start TIMESTAMPTZ, day_end TIMESTAMPTZ)
     """)
     insert_many(db, "g_day", calendar)
-    db.execute(f"""
+    db.execute(
+        f"""
         CREATE OR REPLACE TEMP TABLE g_daily_options AS
         WITH expected AS (
             SELECT d.*, m.*, CASE WHEN seconds_before > 0 THEN slot + INTERVAL '1 hour' ELSE slot END AS valid_at
@@ -347,7 +437,9 @@ def daily(db, name, contract, start, end, cutoff):
                s.* EXCLUDE (local_date, metric, source_rank),
                coalesce(s.usable AND s.aligned, false) AS complete
         FROM expected e LEFT JOIN matched s USING (local_date, metric, source_rank, valid_at)
-    """, [cutoff])
+    """,
+        [cutoff],
+    )
     db.execute("""
         CREATE OR REPLACE TEMP TABLE g_daily_result AS
         WITH aggregates AS (
@@ -380,31 +472,38 @@ def daily(db, name, contract, start, end, cutoff):
         """).fetchall()
     partial = db.execute("SELECT count(*) FROM g_daily_result WHERE coverage_status <> 'complete'").fetchone()[0]
     manifest = manifest_from(db, "g_daily_input")
-    build_id, created = build_record(db, name, contract, [start, end], output, manifest, cutoff,
-                                    {"partial_metrics": partial})
+    build_id, created = build_record(
+        db, name, contract, [start, end], output, manifest, cutoff, {"partial_metrics": partial}
+    )
     if not created:
         return {"status": "unchanged", "build_id": build_id}
     prefix = [contract["version"], *contract["scope"], region]
     table = f"gold.{contract['kind']}"
-    db.execute(f"""
+    db.execute(
+        f"""
         DELETE FROM {table} WHERE contract_version = ? AND {scope_filter(table)}
         AND reporting_timezone = ? AND local_date >= ? AND local_date < ?
-    """, [*prefix, start, end])
+    """,
+        [*prefix, start, end],
+    )
     insert_many(db, table, [(*prefix, *row, build_id) for row in output])
     return {"status": "published", "build_id": build_id, "rows": len(output)}
 
 
 def training_candidates(db, contract, cutoff, basis, surface):
     if surface == "gold":
-        db.execute(f"""
+        db.execute(
+            f"""
             CREATE OR REPLACE TEMP TABLE g_served AS
             SELECT d.decision_at, r.release_id, r.vintage_id, r.published_at, r.initialized_at
             FROM g_decision d JOIN gold.forecast_release r ON r.published_at <= d.decision_at
             JOIN ops.gold_build b USING (build_id)
-            WHERE b.contract_name = ? AND r.contract_version = ? AND {scope_filter('r')}
+            WHERE b.contract_name = ? AND r.contract_version = ? AND {scope_filter("r")}
             QUALIFY row_number() OVER (PARTITION BY d.decision_at
                        ORDER BY r.published_at DESC, r.release_id DESC) = 1
-        """, [contract["release_contract"], contract["release_version"], *contract["scope"]])
+        """,
+            [contract["release_contract"], contract["release_version"], *contract["scope"]],
+        )
         selection = """
             JOIN g_served r USING (decision_at)
             JOIN gold.release_input i ON i.release_id = r.release_id AND i.valid_at = e.input_at
@@ -417,7 +516,8 @@ def training_candidates(db, contract, cutoff, basis, surface):
         selection = "JOIN gold.series_values f ON f.valid_at = e.input_at"
         release_at = "NULL::TIMESTAMPTZ"
         clock = "f.warehouse_available_at" if basis == "warehouse" else "f.source_available_at"
-    db.execute(f"""
+    db.execute(
+        f"""
         CREATE OR REPLACE TEMP TABLE g_feature_inputs AS
         WITH visible AS (
             SELECT e.decision_at, e.valid_at AS target_at, f.valid_at, f.series_id, f.vintage_id, f.revision_no,
@@ -436,7 +536,9 @@ def training_candidates(db, contract, cutoff, basis, surface):
         )
         SELECT * FROM visible WHERE aligned AND usable
         QUALIFY count(*) OVER (PARTITION BY decision_at, vintage_id, metric, target_at, valid_at) = 1
-    """, [*contract["scope"], cutoff])
+    """,
+        [*contract["scope"], cutoff],
+    )
     db.execute("""
         CREATE OR REPLACE TEMP TABLE g_feature_candidates AS
         SELECT decision_at, target_at AS valid_at, vintage_id, metric, any_value(required) AS required,
@@ -484,7 +586,8 @@ def training_labels(db, contract, cutoff):
     before, after = label.get("before", 0), label.get("after", 0)
     if before < 0 or after < 0 or (before and after):
         raise ValueError("Invalid target interval")
-    db.execute(f"""
+    db.execute(
+        f"""
         CREATE OR REPLACE TEMP TABLE g_labels AS
         WITH visible AS (
             SELECT f.series_id, f.vintage_id, f.valid_at, f.revision_no, f.warehouse_available_at,
@@ -513,8 +616,17 @@ def training_labels(db, contract, cutoff):
                CASE WHEN l.label_status <> 'ambiguous' THEN l.revision_no END AS revision_no,
                coalesce(l.label_status, 'missing') AS label_status
         FROM (SELECT DISTINCT valid_at FROM g_expected_feature) t LEFT JOIN checked l USING (valid_at)
-    """, [*contract["label_scope"], label["measure"], label.get("definition_version", 1),
-          label["unit"], cutoff, before, after])
+    """,
+        [
+            *contract["label_scope"],
+            label["measure"],
+            label.get("definition_version", 1),
+            label["unit"],
+            cutoff,
+            before,
+            after,
+        ],
+    )
 
 
 def train(db, name, contract, start, end, *, decisions, dataset, cutoff, basis, surface):
@@ -526,10 +638,13 @@ def train(db, name, contract, start, end, *, decisions, dataset, cutoff, basis, 
         raise ValueError("The Gold surface requires warehouse availability and a pinned forecast release contract")
     start, end = hour_grid(db, start, end)
     decisions = sorted(set(instant(x) for x in decisions))
-    existing = db.execute("""
+    existing = db.execute(
+        """
         SELECT d.build_cutoff_at, b.quality_results, d.build_id FROM gold.ml_dataset d
         JOIN ops.gold_build b USING (build_id) WHERE d.dataset_id = ?
-    """, [dataset]).fetchone()
+    """,
+        [dataset],
+    ).fetchone()
     cutoff = instant(cutoff) if cutoff else existing[0] if existing else now()
     settings = digest([name, contract, dataset, start, end, decisions, cutoff, basis, surface])
     if existing:
@@ -570,30 +685,65 @@ def train(db, name, contract, start, end, *, decisions, dataset, cutoff, basis, 
     """).fetchall()
     labels = db.execute("SELECT * FROM g_labels ORDER BY valid_at").fetchall()
     manifest = manifest_from(db, "g_selected_feature_inputs", "g_labels")
-    build_id, _ = build_record(db, name, contract, settings, [*features, *labels], manifest, cutoff, {
-        "dataset_specification": settings, "feature_rows": len(features), "label_rows": len(labels),
-        "missing_feature_rows": sum(row[-3] for row in features),
-        "missing_label_rows": sum(row[-1] != "complete" for row in labels),
-    })
-    insert(db, "gold.ml_dataset", [dataset, contract["feature_set_version"], contract["label_set_version"],
-                                    basis, surface, cutoff, build_id])
+    build_id, _ = build_record(
+        db,
+        name,
+        contract,
+        settings,
+        [*features, *labels],
+        manifest,
+        cutoff,
+        {
+            "dataset_specification": settings,
+            "feature_rows": len(features),
+            "label_rows": len(labels),
+            "missing_feature_rows": sum(row[-3] for row in features),
+            "missing_label_rows": sum(row[-1] != "complete" for row in labels),
+        },
+    )
+    insert(
+        db,
+        "gold.ml_dataset",
+        [dataset, contract["feature_set_version"], contract["label_set_version"], basis, surface, cutoff, build_id],
+    )
     insert_many(db, "gold.ml_forecast_features", [(dataset, *contract["scope"], *row) for row in features])
     site_id, label_product, _, label_profile = contract["label_scope"]
-    insert_many(db, "gold.ml_weather_labels", [
-        (dataset, site_id, at, target, label_product, label_profile, avail, series, vintage, revision, status)
-        for at, target, avail, series, vintage, revision, status in labels])
-    return {"status": "published", "build_id": build_id, "dataset_id": dataset,
-            "features": len(features), "labels": len(labels)}
+    insert_many(
+        db,
+        "gold.ml_weather_labels",
+        [
+            (dataset, site_id, at, target, label_product, label_profile, avail, series, vintage, revision, status)
+            for at, target, avail, series, vintage, revision, status in labels
+        ],
+    )
+    return {
+        "status": "published",
+        "build_id": build_id,
+        "dataset_id": dataset,
+        "features": len(features),
+        "labels": len(labels),
+    }
 
 
-def publish(db, config, name, start, end, *, cutoff=None, decisions=(), dataset=None,
-            basis="warehouse", surface="silver"):
+def publish(
+    db, config, name, start, end, *, cutoff=None, decisions=(), dataset=None, basis="warehouse", surface="silver"
+):
     with transaction(db):
         contract = gold_contract(db, config, name)
         kind = contract["kind"]
         if kind == "ml":
-            result = train(db, name, contract, start, end, decisions=decisions, dataset=dataset,
-                           cutoff=cutoff, basis=basis, surface=surface)
+            result = train(
+                db,
+                name,
+                contract,
+                start,
+                end,
+                decisions=decisions,
+                dataset=dataset,
+                cutoff=cutoff,
+                basis=basis,
+                surface=surface,
+            )
         elif kind in {"forecast", "ensemble"}:
             result = forecast(db, name, contract, start, end, instant(cutoff) if cutoff else now())
         elif kind in {"weather_daily", "environment_daily"}:
@@ -604,7 +754,8 @@ def publish(db, config, name, start, end, *, cutoff=None, decisions=(), dataset=
 
 
 def impacted_days(db, contract, after, through):
-    intervals = db.execute(f"""
+    intervals = db.execute(
+        f"""
         WITH changed AS (
             SELECT f.series_id, f.vintage_id, f.valid_at, f.revision_no, f.window_start, f.window_end
             FROM gold.series_values f JOIN g_report_source m ON {metric_join()} AND {scope_join("f", "m")}
@@ -617,7 +768,9 @@ def impacted_days(db, contract, after, through):
         FROM changed c JOIN silver.series_value old
         ON (c.series_id, c.vintage_id, c.valid_at, c.revision_no - 1)
            = (old.series_id, old.vintage_id, old.valid_at, old.revision_no)
-    """, [through, after, after]).fetchall()
+    """,
+        [through, after, after],
+    ).fetchall()
     zone = ZoneInfo(contract["timezone"])
     lower = date.fromisoformat(str(contract["reporting_start"])) if "reporting_start" in contract else date.min
     upper = date.fromisoformat(str(contract["reporting_end"])) if "reporting_end" in contract else date.max
@@ -650,27 +803,36 @@ def refresh(db, config, names=None):
             kind = contract["kind"]
             cutoff = now()
             if kind in {"forecast", "ensemble"}:
-                window = db.execute("""
+                window = db.execute(
+                    """
                     SELECT window_start, window_end FROM ops.extraction_slice
                     WHERE json_extract_string(specification, '$.job_name') = ?
                       AND window_end - window_start = ? * INTERVAL '1 hour'
                       AND status IN ('complete', 'partial', 'retryable')
                     ORDER BY window_start DESC, window_end DESC LIMIT 1
-                """, [contract["job"], contract["hours"]]).fetchone()
+                """,
+                    [contract["job"], contract["hours"]],
+                ).fetchone()
                 results[name] = forecast(db, name, contract, *window, cutoff) if window else {"status": "no_input"}
             elif kind in {"weather_daily", "environment_daily"}:
                 version = contract["version"]
-                previous = db.execute("""
+                previous = db.execute(
+                    """
                     SELECT processed_through FROM ops.gold_refresh WHERE contract_name = ? AND contract_version = ?
-                """, [name, version]).fetchone()
+                """,
+                    [name, version],
+                ).fetchone()
                 daily_sources_stage(db, contract, kind == "weather_daily")
                 windows = list(impacted_days(db, contract, previous[0] if previous else None, cutoff))
                 results[name] = [daily(db, name, contract, start, end, cutoff) for start, end in windows]
-                db.execute("""
+                db.execute(
+                    """
                     INSERT INTO ops.gold_refresh VALUES (?, ?, ?)
                     ON CONFLICT (contract_name, contract_version)
                     DO UPDATE SET processed_through = greatest(excluded.processed_through, gold_refresh.processed_through)
-                """, [name, version, cutoff])
+                """,
+                    [name, version, cutoff],
+                )
             else:
                 raise ValueError("ML datasets require an explicit publish with decisions and a dataset ID")
     return results

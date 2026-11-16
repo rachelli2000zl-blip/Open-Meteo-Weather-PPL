@@ -95,8 +95,12 @@ def run(args, db):
         elif command == "plan-group":
             anchor = args.anchor or now()
             jobs = config["job_groups"][args.group]
-            show({"inventory_version": config.get("warehouse", {}).get("version"),
-                  "planned_slices": {job: len(plan_job(db, config, job, anchor=anchor)) for job in jobs}})
+            show(
+                {
+                    "inventory_version": config.get("warehouse", {}).get("version"),
+                    "planned_slices": {job: len(plan_job(db, config, job, anchor=anchor)) for job in jobs},
+                }
+            )
         elif command == "poll":
             with httpx.Client(timeout=25) as client:
                 status, ids = poll(db, client, config, args.job)
@@ -105,15 +109,27 @@ def run(args, db):
         elif command == "refresh":
             show(refresh(db, config, args.contract))
         else:
-            result = publish(db, config, args.contract, args.start, args.end, cutoff=args.cutoff,
-                             decisions=args.decision, dataset=args.dataset, basis=args.basis, surface=args.surface)
+            result = publish(
+                db,
+                config,
+                args.contract,
+                args.start,
+                args.end,
+                cutoff=args.cutoff,
+                decisions=args.decision,
+                dataset=args.dataset,
+                basis=args.basis,
+                surface=args.surface,
+            )
             show(result)
             return 2 if result["status"] in {"ineligible", "superseded"} else 0
     elif command == "snapshot":
         show(snapshot(db, args.output))
     elif command == "work":
         with httpx.Client(timeout=25) as client:
-            results = work(db, client, max_requests=args.max_requests, max_attempts=args.max_attempts, workers=args.workers)
+            results = work(
+                db, client, max_requests=args.max_requests, max_attempts=args.max_attempts, workers=args.workers
+            )
         show([{"slice_id": slice_id, "status": status} for slice_id, status in results])
         return 2 if any(status in {"failed", "invalid", "partial", "deferred_quota"} for _, status in results) else 0
     elif command in {"ingest", "replay"}:
@@ -127,10 +143,26 @@ def run(args, db):
                 raise ValueError("Provide both a verified availability timestamp and its source reference")
             body = args.body.read_bytes()
             response = Response(args.http_status, args.content_type, body, args.error, args.fetched_at)
-            fetch_id = fetch_id or uuid_key([args.slice_id, args.requested_at, args.fetched_at,
-                                             args.http_status, args.error, args.content_type, checksum(body)])
-            fetch_id = land(db, slice_, response, requested_at=args.requested_at,
-                            fetch_id=fetch_id, expected_sha256=args.sha256, evidence=evidence)
+            fetch_id = fetch_id or uuid_key(
+                [
+                    args.slice_id,
+                    args.requested_at,
+                    args.fetched_at,
+                    args.http_status,
+                    args.error,
+                    args.content_type,
+                    checksum(body),
+                ]
+            )
+            fetch_id = land(
+                db,
+                slice_,
+                response,
+                requested_at=args.requested_at,
+                fetch_id=fetch_id,
+                expected_sha256=args.sha256,
+                evidence=evidence,
+            )
         if command == "replay" and args.mapping_job:
             slice_ = replay_mappings(slice_, load_config(args.config), args.mapping_job)
         status = normalize(db, slice_, fetch_id)
@@ -142,7 +174,7 @@ def run(args, db):
                    coverage_result, not_before_at FROM ops.extraction_slice ORDER BY priority, window_start, slice_id
         """)
         columns = [entry[0] for entry in result.description]
-        show([dict(zip(columns, row)) for row in result.fetchall()])
+        show([dict(zip(columns, row, strict=True)) for row in result.fetchall()])
     return 0
 
 

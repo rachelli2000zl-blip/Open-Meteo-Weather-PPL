@@ -5,33 +5,66 @@ from datetime import UTC, date, datetime, time, timedelta
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
-from .db import CATEGORIES, PACKAGE, digest, instant, insert, json_text, key, now, transaction, uuid_key
+from .db import CATEGORIES, PACKAGE, digest, insert, instant, json_text, key, now, transaction, uuid_key
 
-
-CADENCES = {"hourly": 3600, "minutely_15": 900, "six_hourly": 21600, "daily": 86400,
-            "weekly": 604800, "monthly": None, "current": None}
-PROFILE_OPTIONS = {"cell_selection", "elevation", "tilt", "azimuth", "disable_bias_correction",
-                   "temporal_resolution", "domains"}
-CONTROL_PARAMS = {"temperature_unit", "wind_speed_unit", "precipitation_unit", "timeformat",
-                  "forecast_days", "past_days", "forecast_hours", "past_hours", "forecast_minutely_15",
-                  "past_minutely_15", "name", "id", "count", "language", "countryCode",
-                  "ensemble", "ensemble_perturbations", "temporal_resolution", "domains"}
-WINDOW_PARAMS = {"start_hour", "end_hour", "start_date", "end_date", "start_minutely_15", "end_minutely_15"}
+CADENCES = {
+    "hourly": 3600,
+    "minutely_15": 900,
+    "six_hourly": 21600,
+    "daily": 86400,
+    "weekly": 604800,
+    "monthly": None,
+    "current": None,
+}
+PROFILE_OPTIONS = {
+    "cell_selection",
+    "elevation",
+    "tilt",
+    "azimuth",
+    "disable_bias_correction",
+    "temporal_resolution",
+    "domains",
+}
+CONTROL_PARAMS = {
+    "temperature_unit",
+    "wind_speed_unit",
+    "precipitation_unit",
+    "timeformat",
+    "forecast_days",
+    "past_days",
+    "forecast_hours",
+    "past_hours",
+    "forecast_minutely_15",
+    "past_minutely_15",
+    "name",
+    "id",
+    "count",
+    "language",
+    "countryCode",
+    "ensemble",
+    "ensemble_perturbations",
+    "temporal_resolution",
+    "domains",
+}
 NO_SELECTOR = "__default__"
 LIMIT_KEYS = ("max_locations", "max_fields", "max_days")
 CALENDAR_BLOCKS = {"daily", "weekly", "monthly"}
 
 
 def load_config(path=None):
-    with (open(path, "rb") if path else PACKAGE.joinpath("starter.toml").open("rb")) as stream:
+    with open(path, "rb") if path else PACKAGE.joinpath("starter.toml").open("rb") as stream:
         return tomllib.load(stream)
 
 
 def resolve_job(config, name):
     job = config["jobs"][name]
     profile = config.get("profiles", {})[job["request_profile"]] if "request_profile" in job else {}
-    return {**profile, **job, "params": {**profile.get("params", {}), **job.get("params", {})},
-            "profile": {**profile.get("profile", {}), **job.get("profile", {})}}
+    return {
+        **profile,
+        **job,
+        "params": {**profile.get("params", {}), **job.get("params", {})},
+        "profile": {**profile.get("profile", {}), **job.get("profile", {})},
+    }
 
 
 def local_midnight(day, zone):
@@ -66,9 +99,18 @@ def slots(start, end, zone, block, step):
 
 def public_url(url, *, metadata=False):
     value = urlsplit(url)
-    if (value.scheme != "https" or value.username or value.password or value.port or value.query
-            or value.fragment or not value.hostname or not value.hostname.endswith(".open-meteo.com")
-            or value.hostname.startswith("customer-") or not value.path.startswith("/")):
+    if (
+        value.scheme != "https"
+        or value.username
+        or value.password
+        or value.port
+        or value.query
+        or value.fragment
+        or not value.hostname
+        or not value.hostname.endswith(".open-meteo.com")
+        or value.hostname.startswith("customer-")
+        or not value.path.startswith("/")
+    ):
         raise ValueError(f"Expected a public Open-Meteo {'metadata' if metadata else 'API'} URL")
     return value
 
@@ -77,8 +119,13 @@ def site_data(name, entry):
     lat, lon = float(entry["latitude"]), float(entry["longitude"])
     if not (-90 <= lat <= 90 and -180 <= lon <= 180):
         raise ValueError(f"Invalid coordinates for {name}")
-    return {"location_key": name, "latitude": lat, "longitude": lon,
-            "display_name": entry.get("display_name", name), "place_id": entry.get("place_id")}
+    return {
+        "location_key": name,
+        "latitude": lat,
+        "longitude": lon,
+        "display_name": entry.get("display_name", name),
+        "place_id": entry.get("place_id"),
+    }
 
 
 def put_site(db, site):
@@ -89,8 +136,10 @@ def put_site(db, site):
     if old and old != tuple(values[2:4]):
         raise ValueError(f"Location {name} already identifies different coordinates")
     if not old:
-        if site["place_id"] is not None and not db.execute(
-                "SELECT 1 FROM silver.place WHERE place_id = ?", [site["place_id"]]).fetchone():
+        if (
+            site["place_id"] is not None
+            and not db.execute("SELECT 1 FROM silver.place WHERE place_id = ?", [site["place_id"]]).fetchone()
+        ):
             raise ValueError(f"Place {site['place_id']} must be ingested before it is assigned to {name}")
         insert(db, "silver.site", values)
     return identity
@@ -113,11 +162,24 @@ def model_metadata(db, model):
     if data.get("metadata_url"):
         public_url(data["metadata_url"], metadata=True)
     if not db.execute("SELECT 1 FROM ops.forecast_model WHERE model_version_id = ?", [ident]).fetchone():
-        insert(db, "ops.forecast_model", [ident, data.get("provider"), data["code"], data.get("domain", "global"),
-               data.get("grid_version"), data.get("spatial_resolution"), data.get("resolution_unit"),
-               data.get("horizon_hours"), data.get("update_interval_seconds"), data.get("metadata_url"),
-               datetime_at(data["effective_from"], UTC) if "effective_from" in data else None,
-               datetime_at(data["effective_to"], UTC) if "effective_to" in data else None])
+        insert(
+            db,
+            "ops.forecast_model",
+            [
+                ident,
+                data.get("provider"),
+                data["code"],
+                data.get("domain", "global"),
+                data.get("grid_version"),
+                data.get("spatial_resolution"),
+                data.get("resolution_unit"),
+                data.get("horizon_hours"),
+                data.get("update_interval_seconds"),
+                data.get("metadata_url"),
+                datetime_at(data["effective_from"], UTC) if "effective_from" in data else None,
+                datetime_at(data["effective_to"], UTC) if "effective_to" in data else None,
+            ],
+        )
     return ident
 
 
@@ -160,8 +222,9 @@ def choose_fields(config, job, at):
 
 def request_limits(product, fields):
     rules = [product.get("request_limits", {})]
-    rules.extend(field.get("request_limits", {}) for field in fields.values()
-                 if field.get("support", "supported") == "supported")
+    rules.extend(
+        field.get("request_limits", {}) for field in fields.values() if field.get("support", "supported") == "supported"
+    )
     result = {}
     for rule in rules:
         for name, value in rule.items():
@@ -193,7 +256,11 @@ def plan_job(db, config, name, *, anchor=None, start=None, end=None, run=None, t
     anchor = instant(anchor) if anchor else now()
     timezone = job.get("timezone", "UTC")
     zone = ZoneInfo(timezone)
-    if category not in {"elevation", "geocoding"} and block not in {"current", "daily", "weekly", "monthly"} and timezone != "UTC":
+    if (
+        category not in {"elevation", "geocoding"}
+        and block not in {"current", "daily", "weekly", "monthly"}
+        and timezone != "UTC"
+    ):
         raise ValueError("Subdaily requests must use UTC to preserve unambiguous slot keys")
     if block == "current":
         step = job.get("step_seconds")
@@ -228,8 +295,11 @@ def plan_job(db, config, name, *, anchor=None, start=None, end=None, run=None, t
     else:
         if not step:
             raise ValueError("A rolling window requires a fixed subdaily cadence")
-        start = (run + timedelta(hours=job.get("first_lead_hours", 0)) if run else
-                 datetime.fromtimestamp(math.ceil(anchor.timestamp() / step) * step, UTC))
+        start = (
+            run + timedelta(hours=job.get("first_lead_hours", 0))
+            if run
+            else datetime.fromtimestamp(math.ceil(anchor.timestamp() / step) * step, UTC)
+        )
         end = start + timedelta(hours=job.get("hours", 24))
     if end <= start:
         raise ValueError("The window must have an exclusive end after its start")
@@ -240,8 +310,10 @@ def plan_job(db, config, name, *, anchor=None, start=None, end=None, run=None, t
             raise ValueError("Monthly windows must use the first day of the month")
         if block == "weekly" and (end.astimezone(zone).date() - start.astimezone(zone).date()).days % 7:
             raise ValueError("Weekly windows must span a whole number of weeks")
-    elif block != "current" and step and ((end - start).total_seconds() % step or start.microsecond):
-        raise ValueError("The window must contain a whole number of slots")
+    elif block != "current" and step:
+        epoch = datetime(1970, 1, 1, tzinfo=UTC)
+        if any((when - epoch) % timedelta(seconds=step) for when in (start, end)):
+            raise ValueError(f"Subdaily request windows must align with the {step}-second cadence")
     all_fields = choose_fields(config, job, anchor)
     if not all_fields and block != "result":
         raise ValueError(f"No field mappings selected for {name}")
@@ -262,11 +334,16 @@ def plan_job(db, config, name, *, anchor=None, start=None, end=None, run=None, t
     limits = request_limits(product, all_fields)
     for field, rule in all_fields.items():
         rule["request_limits"] = request_limits(product, {field: rule})
-    sizes = (job.get("batch_sites", len(sites) or 1), job.get("batch_fields", len(all_fields) or 1),
-             job.get("batch_days", 14 if mode == "archive" else 366))
+    sizes = (
+        job.get("batch_sites", len(sites) or 1),
+        job.get("batch_fields", len(all_fields) or 1),
+        job.get("batch_days", 14 if mode == "archive" else 366),
+    )
     if any(type(size) is not int or size < 1 for size in sizes):
         raise ValueError("Batch sizes must be positive")
-    site_size, field_size, days = (min(size, limits.get(limit, size)) for size, limit in zip(sizes, LIMIT_KEYS))
+    site_size, field_size, days = (
+        min(size, limits.get(limit, size)) for size, limit in zip(sizes, LIMIT_KEYS, strict=True)
+    )
     if mode == "live" and len(all_fields) > field_size and job.get("coherent", False):
         raise ValueError("A coherent live job needs all shared fields in one bundle")
     full_response = bool(run or job.get("window_params") == "relative")
@@ -287,9 +364,15 @@ def plan_job(db, config, name, *, anchor=None, start=None, end=None, run=None, t
         if model and not active_period(model, run or anchor):
             raise ValueError(f"Model version for {name} is outside its effective dates")
         model_id = model_metadata(db, model)
-        if trigger and (not model_id or not db.execute("""
+        if trigger and (
+            not model_id
+            or not db.execute(
+                """
                 SELECT 1 FROM bronze.model_update WHERE poll_id = ? AND model_version_id = ?
-                """, [trigger["poll_id"], model_id]).fetchone()):
+                """,
+                [trigger["poll_id"], model_id],
+            ).fetchone()
+        ):
             raise ValueError("The triggering poll must refer to the selected model version")
         for site in sites:
             put_site(db, site)
@@ -300,45 +383,126 @@ def plan_job(db, config, name, *, anchor=None, start=None, end=None, run=None, t
             for batch_sites in batches(sites, site_size):
                 for names in batches(list(all_fields), field_size):
                     fields = {field: dict(all_fields[field]) for field in names}
-                    params = build_params(product, selector, job, raw_params, block, fields, batch_sites,
-                                          batch_start, batch_end, zone, step, run)
-                    profile = profile_data(params | {"timezone": timezone}, job.get("profile"),
-                                           calendar=block in {"daily", "weekly", "monthly"})
-                    spec = dict(job_name=name, product=product, sites=batch_sites, fields=fields, params=params,
-                                profile=profile, selector=selector, selector_kind=job.get("selector_kind", "default"),
-                                timezone=timezone, block=block, step=step, mode=mode, model_id=model_id,
-                                full_response=full_response or (use_dates and block not in CALENDAR_BLOCKS))
+                    params = build_params(
+                        product,
+                        selector,
+                        job,
+                        raw_params,
+                        block,
+                        fields,
+                        batch_sites,
+                        batch_start,
+                        batch_end,
+                        zone,
+                        step,
+                        run,
+                    )
+                    profile = profile_data(
+                        params | {"timezone": timezone},
+                        job.get("profile"),
+                        calendar=block in {"daily", "weekly", "monthly"},
+                    )
+                    spec = dict(
+                        job_name=name,
+                        product=product,
+                        sites=batch_sites,
+                        fields=fields,
+                        params=params,
+                        profile=profile,
+                        selector=selector,
+                        selector_kind=job.get("selector_kind", "default"),
+                        timezone=timezone,
+                        block=block,
+                        step=step,
+                        mode=mode,
+                        model_id=model_id,
+                        full_response=full_response or (use_dates and block not in CALENDAR_BLOCKS),
+                    )
                     if any(f.get("horizon_hours") for f in fields.values()):
-                        spec["horizon_anchors"] = {basis: at.isoformat() for basis, at in
-                                                   (("run", run), ("requested_window", start),
-                                                    ("trigger_run", trigger_run)) if at is not None}
-                    identity = [name, spec, batch_start, batch_end, run,
-                                trigger.get("initialized_at") if trigger else anchor if block == "current" else None]
+                        spec["horizon_anchors"] = {
+                            basis: at.isoformat()
+                            for basis, at in (("run", run), ("requested_window", start), ("trigger_run", trigger_run))
+                            if at is not None
+                        }
+                    identity = [
+                        name,
+                        spec,
+                        batch_start,
+                        batch_end,
+                        run,
+                        trigger.get("initialized_at") if trigger else anchor if block == "current" else None,
+                    ]
                     slice_id = uuid_key(identity)
                     ids.append(slice_id)
                     if db.execute("SELECT 1 FROM ops.extraction_slice WHERE slice_id = ?", [slice_id]).fetchone():
                         continue
                     live = mode == "live" or (mode == "exact" and trigger is not None)
-                    units = round(max(1, len(batch_sites)) *
-                                  max(1, len([f for f in fields.values() if f.get("support", "supported") == "supported"]) / 10) *
-                                  max(1, (batch_end - batch_start).total_seconds() / 1209600,
-                                      request_days / 14 if full_response else 0), 3)
-                    insert(db, "ops.extraction_slice", [
-                        slice_id, digest(identity), category, product["code"], selector, digest(batch_sites),
-                        digest(profile), digest(names), batch_start, batch_end, anchor if live else None,
-                        run, trigger.get("poll_id") if trigger else None, trigger.get("not_before") if trigger else None,
-                        json_text(names), job.get("call_units", units), "queued", None, 0 if live else 10, json_text(spec)])
+                    units = round(
+                        max(1, len(batch_sites))
+                        * max(1, len([f for f in fields.values() if f.get("support", "supported") == "supported"]) / 10)
+                        * max(
+                            1,
+                            (batch_end - batch_start).total_seconds() / 1209600,
+                            request_days / 14 if full_response else 0,
+                        ),
+                        3,
+                    )
+                    insert(
+                        db,
+                        "ops.extraction_slice",
+                        [
+                            slice_id,
+                            digest(identity),
+                            category,
+                            product["code"],
+                            selector,
+                            digest(batch_sites),
+                            digest(profile),
+                            digest(names),
+                            batch_start,
+                            batch_end,
+                            anchor if live else None,
+                            run,
+                            trigger.get("poll_id") if trigger else None,
+                            trigger.get("not_before") if trigger else None,
+                            json_text(names),
+                            job.get("call_units", units),
+                            "queued",
+                            None,
+                            0 if live else 10,
+                            json_text(spec),
+                        ],
+                    )
                     for api_field, rule in fields.items():
                         domain = job.get("domain", "global")
                         capability_id = key([product["code"], selector, domain, block, api_field, rule])
-                        if not db.execute("SELECT 1 FROM ops.api_capability WHERE capability_id = ?",
-                                          [capability_id]).fetchone():
-                            parse_date = lambda value: datetime_at(value, UTC) if value else None
-                            insert(db, "ops.api_capability", [capability_id, product["code"], selector, domain, block,
-                                   api_field, json_text(rule.get("request_limits", {})), rule.get("horizon_hours"),
-                                   rule.get("native_step_seconds"), rule.get("support", "supported"),
-                                   parse_date(rule.get("verified_at")), parse_date(rule.get("effective_from")),
-                                   parse_date(rule.get("effective_to")), json_text(rule)])
+                        if not db.execute(
+                            "SELECT 1 FROM ops.api_capability WHERE capability_id = ?", [capability_id]
+                        ).fetchone():
+
+                            def parse_date(value):
+                                return datetime_at(value, UTC) if value else None
+
+                            insert(
+                                db,
+                                "ops.api_capability",
+                                [
+                                    capability_id,
+                                    product["code"],
+                                    selector,
+                                    domain,
+                                    block,
+                                    api_field,
+                                    json_text(rule.get("request_limits", {})),
+                                    rule.get("horizon_hours"),
+                                    rule.get("native_step_seconds"),
+                                    rule.get("support", "supported"),
+                                    parse_date(rule.get("verified_at")),
+                                    parse_date(rule.get("effective_from")),
+                                    parse_date(rule.get("effective_to")),
+                                    json_text(rule),
+                                ],
+                            )
                         insert(db, "ops.slice_capability", [slice_id, capability_id])
                     planned = dict(spec, id=slice_id, start=batch_start, end=batch_end, run=run)
                     locations = batch_sites or [{"location_key": "__query__"}]
@@ -350,7 +514,7 @@ def plan_job(db, config, name, *, anchor=None, start=None, end=None, run=None, t
 
 
 def batches(values, size):
-    return [values[at:at + size] for at in range(0, len(values), size)] or [[]]
+    return [values[at : at + size] for at in range(0, len(values), size)] or [[]]
 
 
 def split_windows(start, end, days, zone, calendar):
@@ -382,8 +546,10 @@ def build_params(product, selector, job, base, block, fields, sites, start, end,
         return params
     style = job.get("window_params", block if block == "minutely_15" else "hour" if block == "hourly" else "date")
     if style == "date":
-        params.update(start_date=start.astimezone(zone).date().isoformat(),
-                      end_date=(end - timedelta(microseconds=1)).astimezone(zone).date().isoformat())
+        params.update(
+            start_date=start.astimezone(zone).date().isoformat(),
+            end_date=(end - timedelta(microseconds=1)).astimezone(zone).date().isoformat(),
+        )
     elif style in {"hour", "minutely_15"} and step:
         params[f"start_{style}"] = start.astimezone(zone).strftime("%Y-%m-%dT%H:%M")
         params[f"end_{style}"] = (end - timedelta(seconds=step)).astimezone(zone).strftime("%Y-%m-%dT%H:%M")
@@ -393,15 +559,18 @@ def build_params(product, selector, job, base, block, fields, sites, start, end,
 
 
 def get_slice(db, slice_id):
-    row = db.execute("""
+    row = db.execute(
+        """
         SELECT slice_id, category, window_start, window_end, requested_run_at, poll_slot_at,
                estimated_call_units, status, specification, not_before_at, priority
         FROM ops.extraction_slice WHERE slice_id = ?
-        """, [slice_id]).fetchone()
+        """,
+        [slice_id],
+    ).fetchone()
     if row is None:
         raise ValueError(f"Unknown slice {slice_id}")
     keys = ("id", "category", "start", "end", "run", "poll_slot", "units", "status", "spec", "not_before", "priority")
-    result = dict(zip(keys, row))
+    result = dict(zip(keys, row, strict=True))
     result.update(json.loads(result.pop("spec")))
     return result
 
@@ -409,12 +578,25 @@ def get_slice(db, slice_id):
 def replay_mappings(slice_, config, job_name):
     job = resolve_job(config, job_name)
     if (job["product"], job.get("selector", NO_SELECTOR), job.get("block")) != (
-            slice_["product"]["code"], slice_["selector"], slice_["block"]):
+        slice_["product"]["code"],
+        slice_["selector"],
+        slice_["block"],
+    ):
         raise ValueError("Replay mappings must use the original product, selector, and block")
     updated = choose_fields(config, job, now())
-    plan_keys = {"support", "horizon_hours", "native_step_seconds", "verified_at",
-                 "effective_from", "effective_to", "request_limits", "members", "member_kind",
-                 "control_member", "horizon_reference"}
+    plan_keys = {
+        "support",
+        "horizon_hours",
+        "native_step_seconds",
+        "verified_at",
+        "effective_from",
+        "effective_to",
+        "request_limits",
+        "members",
+        "member_kind",
+        "control_member",
+        "horizon_reference",
+    }
     fields = {}
     for name, old in slice_["fields"].items():
         candidate = updated.get(name, old)

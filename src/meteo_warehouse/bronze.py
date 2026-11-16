@@ -8,7 +8,7 @@ from email.utils import parsedate_to_datetime
 
 import httpx
 
-from .db import instant, insert, now, transaction, uuid_key
+from .db import insert, instant, now, transaction
 from .plan import get_slice, model_metadata, plan_job, public_url, resolve_job
 
 BODY_LIMIT = 32 * 1024 * 1024
@@ -63,8 +63,7 @@ def fetch(client, url, params=None):
                     break
     except httpx.HTTPError as exc:
         error = type(exc).__name__
-    return Response(status, content_type, bytes(body) if body is not None else None,
-                    error, now(), retry_after)
+    return Response(status, content_type, bytes(body) if body is not None else None, error, now(), retry_after)
 
 
 def available_budget(db, units, *, metadata=False):
@@ -72,10 +71,13 @@ def available_budget(db, units, *, metadata=False):
     for seconds, limit in LIMITS:
         if metadata and seconds >= 86400:
             continue
-        used = db.execute("""
+        used = db.execute(
+            """
             SELECT coalesce(sum(call_units), 0) FROM ops.call_reservation
             WHERE reserved_at > ? AND (? OR NOT is_metadata)
-            """, [stamp - timedelta(seconds=seconds), seconds < 86400]).fetchone()[0]
+            """,
+            [stamp - timedelta(seconds=seconds), seconds < 86400],
+        ).fetchone()[0]
         if used + units > limit:
             return False
     return True
@@ -101,28 +103,63 @@ def land(db, slice_, response, *, requested_at, fetch_id=None, expected_sha256=N
     table = f"bronze.{slice_['category']}"
     source = public_url(slice_["product"]["url"])
     body_hash = expected_sha256 if expected_sha256 is not None else checksum(response.body)
-    existing = db.execute(f"""
+    existing = db.execute(
+        f"""
         SELECT slice_id, body_sha256, response_body, requested_at, fetched_at, http_status, fetch_error
         FROM {table} WHERE fetch_id = ?
-    """, [fetch_id]).fetchone()
+    """,
+        [fetch_id],
+    ).fetchone()
     if existing:
-        if existing != (slice_["id"], body_hash, response.body, requested_at,
-                        fetched_at, response.status, response.error):
+        if existing != (
+            slice_["id"],
+            body_hash,
+            response.body,
+            requested_at,
+            fetched_at,
+            response.status,
+            response.error,
+        ):
             raise ValueError(f"Attempt {fetch_id} already contains different evidence")
-        previous_evidence = db.execute("""
+        previous_evidence = db.execute(
+            """
             SELECT source_available_at, source_reference, ordered_correction
             FROM ops.availability_evidence WHERE fetch_id = ?
-        """, [fetch_id]).fetchone()
+        """,
+            [fetch_id],
+        ).fetchone()
         if evidence and previous_evidence != evidence:
             raise ValueError("Attempt already has different availability evidence")
         return fetch_id
     with transaction(db):
-        attempt = db.execute(f"SELECT coalesce(max(attempt_no), 0) + 1 FROM {table} WHERE slice_id = ?",
-                             [slice_["id"]]).fetchone()[0]
-        insert(db, table, [fetch_id, slice_["id"], attempt, slice_["product"]["code"],
-               source.hostname, source.path, slice_["product"].get("provider"), slice_["selector"],
-               slice_["selector_kind"], json_text(slice_["params"]), slice_["run"], requested_at, fetched_at,
-               response.status, response.content_type, response.body, body_hash, response.error, slice_["units"]])
+        attempt = db.execute(
+            f"SELECT coalesce(max(attempt_no), 0) + 1 FROM {table} WHERE slice_id = ?", [slice_["id"]]
+        ).fetchone()[0]
+        insert(
+            db,
+            table,
+            [
+                fetch_id,
+                slice_["id"],
+                attempt,
+                slice_["product"]["code"],
+                source.hostname,
+                source.path,
+                slice_["product"].get("provider"),
+                slice_["selector"],
+                slice_["selector_kind"],
+                json_text(slice_["params"]),
+                slice_["run"],
+                requested_at,
+                fetched_at,
+                response.status,
+                response.content_type,
+                response.body,
+                body_hash,
+                response.error,
+                slice_["units"],
+            ],
+        )
         if evidence:
             insert(db, "ops.availability_evidence", [fetch_id, *evidence])
         db.execute("UPDATE ops.extraction_slice SET status = 'landed' WHERE slice_id = ?", [slice_["id"]])
@@ -135,7 +172,7 @@ def read_attempt(db, slice_, fetch_id):
     row = result.fetchone()
     if row is None:
         raise ValueError(f"Unknown attempt {fetch_id} for slice {slice_['id']}")
-    return dict(zip([col[0] for col in result.description], row))
+    return dict(zip([col[0] for col in result.description], row, strict=True))
 
 
 def retry_at(response, attempt_no):
@@ -161,12 +198,15 @@ def capture(client, slice_):
 def work(db, client, *, max_requests=20, max_attempts=3, workers=4):
     from .silver import horizon_end, normalize, unavailable
 
-    ids = db.execute("""
+    ids = db.execute(
+        """
         SELECT slice_id FROM ops.extraction_slice
         WHERE status IN ('queued', 'deferred_quota', 'retryable', 'landed')
           AND (not_before_at IS NULL OR not_before_at <= ? OR status = 'landed')
         ORDER BY priority, window_start, slice_key
-    """, [now()]).fetchall()
+    """,
+        [now()],
+    ).fetchall()
     results = []
     requests = 0
     pending = []
@@ -187,15 +227,17 @@ def work(db, client, *, max_requests=20, max_attempts=3, workers=4):
         for slice_, fetch_id, count, response in completed:
             status = normalize(db, slice_, fetch_id)
             usable += status in {"complete", "partial"}
-            retryable = (response.status in RETRYABLE or
-                         (response.error and response.error != "response_too_large"))
+            retryable = response.status in RETRYABLE or (response.error and response.error != "response_too_large")
             if (retryable or status in {"partial", "invalid"}) and count + 1 < max_attempts:
-                db.execute("UPDATE ops.extraction_slice SET status = 'retryable', not_before_at = ? WHERE slice_id = ?",
-                           [retry_at(response, count + 1), slice_["id"]])
+                db.execute(
+                    "UPDATE ops.extraction_slice SET status = 'retryable', not_before_at = ? WHERE slice_id = ?",
+                    [retry_at(response, count + 1), slice_["id"]],
+                )
             results.append((slice_["id"], status))
         ids = [fetch_id for _, fetch_id, _, _ in completed]
-        facts = db.execute("SELECT count(*) FROM silver.series_value WHERE fetch_id IN (SELECT unnest(?))",
-                           [ids]).fetchone()[0]
+        facts = db.execute(
+            "SELECT count(*) FROM silver.series_value WHERE fetch_id IN (SELECT unnest(?))", [ids]
+        ).fetchone()[0]
         insert(db, "ops.ingestion_batch", [uuid.uuid4(), phase, min(starts), now(), len(ids), usable, facts])
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -205,9 +247,12 @@ def work(db, client, *, max_requests=20, max_attempts=3, workers=4):
                 drain()
             table = f"bronze.{slice_['category']}"
             if slice_["status"] == "landed":
-                fetch_id = db.execute(f"""
+                fetch_id = db.execute(
+                    f"""
                     SELECT fetch_id FROM {table} WHERE slice_id = ? ORDER BY attempt_no DESC LIMIT 1
-                """, [slice_id]).fetchone()[0]
+                """,
+                    [slice_id],
+                ).fetchone()[0]
                 results.append((slice_id, normalize(db, slice_, fetch_id)))
                 continue
             names = list(slice_["fields"].values())
@@ -215,8 +260,11 @@ def work(db, client, *, max_requests=20, max_attempts=3, workers=4):
                 reason = "unverified" if any(rule.get("support") == "unverified" for rule in names) else "unsupported"
                 results.append((slice_id, unavailable(db, slice_, reason)))
                 continue
-            if names and all(horizon_end(slice_, rule) <= slice_["start"] for rule in names
-                             if rule.get("support", "supported") == "supported"):
+            if names and all(
+                horizon_end(slice_, rule) <= slice_["start"]
+                for rule in names
+                if rule.get("support", "supported") == "supported"
+            ):
                 results.append((slice_id, unavailable(db, slice_, "outside_horizon")))
                 continue
             if requests >= max_requests:
@@ -266,29 +314,50 @@ def poll(db, client, config, job_name):
             mod = payload.get("last_run_modification_time")
             modified = metadata_time(mod) if mod is not None else None
             durations = [payload.get(name) for name in ("temporal_resolution_seconds", "update_interval_seconds")]
-            if (initialized > available or any(x is not None and (type(x) is not int or x <= 0) for x in durations)):
+            if initialized > available or any(x is not None and (type(x) is not int or x <= 0) for x in durations):
                 raise ValueError("Invalid metadata ordering or resolution")
             values = [poll_id, initialized, modified, available, *durations]
         except (ValueError, TypeError, KeyError, OverflowError, OSError):
             error = "invalid_model_metadata"
     with transaction(db):
-        insert(db, "bronze.model_update", [poll_id, model_id, model["metadata_url"], response.fetched_at,
-               response.status, response.body, checksum(response.body), error])
+        insert(
+            db,
+            "bronze.model_update",
+            [
+                poll_id,
+                model_id,
+                model["metadata_url"],
+                response.fetched_at,
+                response.status,
+                response.body,
+                checksum(response.body),
+                error,
+            ],
+        )
         if values:
             insert(db, "silver.model_update_observation", values)
     if values is None:
         return "invalid", []
     not_before = available + timedelta(minutes=10)
-    existing = db.execute("""
+    existing = db.execute(
+        """
         SELECT e.slice_id, e.specification FROM ops.extraction_slice e
         JOIN bronze.model_update p ON p.poll_id = e.trigger_poll_id
         JOIN silver.model_update_observation o ON o.poll_id = p.poll_id
         WHERE p.model_version_id = ? AND o.initialized_at = ?
-        """, [model_id, initialized]).fetchall()
+        """,
+        [model_id, initialized],
+    ).fetchall()
     matching = [slice_id for slice_id, spec in existing if json.loads(spec).get("job_name") == job_name]
     if matching:
         return "already_planned", matching
     trigger = dict(poll_id=poll_id, initialized_at=initialized, not_before=not_before)
-    planned = plan_job(db, config, job_name, anchor=max(not_before, response.fetched_at),
-                       run=initialized if job["mode"] == "exact" else None, trigger=trigger)
+    planned = plan_job(
+        db,
+        config,
+        job_name,
+        anchor=max(not_before, response.fetched_at),
+        run=initialized if job["mode"] == "exact" else None,
+        trigger=trigger,
+    )
     return "planned", planned

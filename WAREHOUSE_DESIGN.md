@@ -157,7 +157,7 @@ For a two-hour block with precipitation `[0.0, null]` and wind speed `[4.0]`, Si
 
 Write detailed failures to `ops.quality_issue` with `slice_id`, `fetch_id` when available, location, block, field, affected time range, rule code, and disposition. Use a stable issue key for idempotent replays. Keep detailed diagnostics even if a load rolls back. Use `silver.coverage` for planned versus usable data by slice. Gold can query both through DuckDB for operational reporting.
 
-## Gold v1
+## Gold
 
 ### Physical tables and join keys
 

@@ -10,7 +10,6 @@ import duckdb
 
 from .db import CATEGORIES, json_text, now
 
-
 TRAINING_EXPORT = """
     SELECT f.site_id, f.decision_at, f.valid_at, f.lead_hours, f.horizon_hours, f.forecast_temp_c,
            f.forecast_precip_mm, f.rolling_features, f.missing_features, l.target_temp_c
@@ -25,7 +24,7 @@ TRAINING_EXPORT = """
 
 
 def snapshot(db, directory):
-    path, = db.execute("SELECT path FROM duckdb_databases() WHERE database_name = current_database()").fetchone()
+    (path,) = db.execute("SELECT path FROM duckdb_databases() WHERE database_name = current_database()").fetchone()
     if path is None or path == ":memory:":
         raise ValueError("Snapshots require a persistent warehouse file")
     directory = Path(directory).resolve()
@@ -67,7 +66,8 @@ def snapshot(db, directory):
 
 def freshness(db):
     attempts = " UNION ALL ".join(
-        f"SELECT fetch_id, slice_id, fetched_at FROM bronze.{category}" for category in CATEGORIES)
+        f"SELECT fetch_id, slice_id, fetched_at FROM bronze.{category}" for category in CATEGORIES
+    )
     rows = db.execute(f"""
         WITH per_release AS (
             SELECT r.release_id, r.published_at, max(a.fetched_at) AS fetched_at,
@@ -93,9 +93,15 @@ def freshness(db):
                count(verified), quantile_cont(verified, 0.95),
                count(feed), quantile_cont(feed, 0.95) FROM clocks
     """).fetchone()
-    return {clock: {"releases": count, "p95_seconds": round(value, 3) if value is not None else None}
-            for clock, count, value in zip(("received_to_gold", "verified_source_to_gold", "exact_run_feed_to_gold"),
-                                          rows[::2], rows[1::2])}
+    return {
+        clock: {"releases": count, "p95_seconds": round(value, 3) if value is not None else None}
+        for clock, count, value in zip(
+            ("received_to_gold", "verified_source_to_gold", "exact_run_feed_to_gold"),
+            rows[::2],
+            rows[1::2],
+            strict=True,
+        )
+    }
 
 
 def throughput(db):
@@ -106,10 +112,14 @@ def throughput(db):
     """).fetchall()
     result = dict.fromkeys(("live", "backfill"))
     for phase, attempts, usable, facts, seconds in rows:
-        result[phase] = {"attempts": attempts, "usable_attempts": usable, "new_facts": facts,
-                         "active_seconds": round(seconds, 3),
-                         "attempts_per_second": round(attempts / seconds, 2) if seconds else None,
-                         "facts_per_second": round(facts / seconds, 2) if seconds else None}
+        result[phase] = {
+            "attempts": attempts,
+            "usable_attempts": usable,
+            "new_facts": facts,
+            "active_seconds": round(seconds, 3),
+            "attempts_per_second": round(attempts / seconds, 2) if seconds else None,
+            "facts_per_second": round(facts / seconds, 2) if seconds else None,
+        }
     return result
 
 
@@ -122,8 +132,12 @@ def time_query(run, trials):
         started = perf_counter()
         run()
         samples.append((perf_counter() - started) * 1000)
-    return {"status": "measured", "rows": rows, "trials": trials,
-            "p95_ms": round(sorted(samples)[math.ceil(0.95 * trials) - 1], 3)}
+    return {
+        "status": "measured",
+        "rows": rows,
+        "trials": trials,
+        "p95_ms": round(sorted(samples)[math.ceil(0.95 * trials) - 1], 3),
+    }
 
 
 def benchmark(db, config, *, trials=None, dataset=None):
@@ -134,16 +148,29 @@ def benchmark(db, config, *, trials=None, dataset=None):
     if type(trials) is not int or trials < 1:
         raise ValueError("Benchmark trials must be a positive integer")
     if dataset is None:
-        latest = db.execute("SELECT dataset_id FROM gold.ml_dataset ORDER BY build_cutoff_at DESC, dataset_id LIMIT 1").fetchone()
+        latest = db.execute(
+            "SELECT dataset_id FROM gold.ml_dataset ORDER BY build_cutoff_at DESC, dataset_id LIMIT 1"
+        ).fetchone()
         dataset = latest[0] if latest else None
-    daily = time_query(lambda: len(db.execute("""
+    daily = time_query(
+        lambda: len(
+            db.execute(
+                """
         SELECT site_id, local_date, temp_min_c, temp_max_c, precip_mm, wind_gust_max_ms, metric_coverage
         FROM gold.weather_daily JOIN silver.site USING (site_id)
         WHERE contract_version = ? AND local_date >= ? AND local_date < ?
           AND location_key IN (SELECT unnest(?))
         ORDER BY site_id, local_date
-    """, [reporting_version, settings["daily_start"], settings["daily_end"], locations]).fetchall()), trials)
-    history = time_query(lambda: len(db.execute("""
+    """,
+                [reporting_version, settings["daily_start"], settings["daily_end"], locations],
+            ).fetchall()
+        ),
+        trials,
+    )
+    history = time_query(
+        lambda: len(
+            db.execute(
+                """
         WITH latest AS (
             SELECT valid_at, site_id, measure_code, value_number, quality_status
             FROM gold.series_values
@@ -154,16 +181,30 @@ def benchmark(db, config, *, trials=None, dataset=None):
         SELECT date_trunc('month', valid_at) AS month, site_id, measure_code, count(*) AS slots, avg(value_number)
         FROM latest WHERE quality_status = 'valid'
         GROUP BY month, site_id, measure_code ORDER BY month, site_id, measure_code
-    """, [settings["history_product"], settings["history_start"], settings["history_end"], locations]).fetchall()), trials)
+    """,
+                [settings["history_product"], settings["history_start"], settings["history_end"], locations],
+            ).fetchall()
+        ),
+        trials,
+    )
     with TemporaryDirectory(prefix="warehouse-benchmark-") as directory:
         file = Path(directory) / "training.parquet"
+
         def export():
             file.unlink(missing_ok=True)
             db.sql(TRAINING_EXPORT, params=[dataset]).write_parquet(str(file))
             return db.execute("SELECT count(*) FROM read_parquet(?)", [str(file)]).fetchone()[0]
 
         training = time_query(export, trials) if dataset else {"status": "no_dataset", "rows": 0}
-    return {"inventory_version": config.get("warehouse", {}).get("version"),
-            "query_windows": settings, "dataset_id": dataset, "freshness": freshness(db),
-            "throughput": throughput(db), "query_latency": {
-                "daily_report": daily, "multi_year_aggregation": history, "training_parquet_export": training}}
+    return {
+        "inventory_version": config.get("warehouse", {}).get("version"),
+        "query_windows": settings,
+        "dataset_id": dataset,
+        "freshness": freshness(db),
+        "throughput": throughput(db),
+        "query_latency": {
+            "daily_report": daily,
+            "multi_year_aggregation": history,
+            "training_parquet_export": training,
+        },
+    }

@@ -8,11 +8,18 @@ from pathlib import Path
 
 import duckdb
 
-
 CATEGORIES = (
-    "weather_forecast", "historical_weather", "ensemble_models", "seasonal_forecast",
-    "climate_change", "marine_forecast", "air_quality", "satellite_radiation", "flood",
-    "geocoding", "elevation",
+    "weather_forecast",
+    "historical_weather",
+    "ensemble_models",
+    "seasonal_forecast",
+    "climate_change",
+    "marine_forecast",
+    "air_quality",
+    "satellite_radiation",
+    "flood",
+    "geocoding",
+    "elevation",
 )
 PACKAGE = files("meteo_warehouse")
 
@@ -63,9 +70,10 @@ def insert(db, table, values):
 def insert_many(db, table, rows):
     if rows:
         # DuckDB unnests parallel column lists side by side.
-        columns = list(zip(*rows))
-        db.execute(f"INSERT INTO {table} SELECT {','.join('unnest(?)' for _ in columns)}",
-                   [list(column) for column in columns])
+        columns = list(zip(*rows, strict=True))
+        db.execute(
+            f"INSERT INTO {table} SELECT {','.join('unnest(?)' for _ in columns)}", [list(column) for column in columns]
+        )
 
 
 def initialize(path):
