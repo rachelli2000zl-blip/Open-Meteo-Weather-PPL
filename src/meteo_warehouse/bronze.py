@@ -1,10 +1,15 @@
 import hashlib
 import json
+import shutil
+import subprocess
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import httpx
 
@@ -62,8 +67,66 @@ def fetch(client, url, params=None):
                     error = "response_too_large"
                     break
     except httpx.HTTPError as exc:
-        error = type(exc).__name__
+        error = f"{type(exc).__name__}: {exc}"
     return Response(status, content_type, bytes(body) if body is not None else None, error, now(), retry_after)
+
+
+def fetch_curl(client, url, params):
+    connect_timeout = client.timeout.connect or 25
+    read_timeout = client.timeout.read or 60
+    with TemporaryDirectory(prefix="weather-fetch-") as directory:
+        body_path = Path(directory) / "body"
+        headers_path = Path(directory) / "headers"
+        command = [
+            "curl",
+            "--disable",
+            "--silent",
+            "--show-error",
+            "--proto",
+            "=https",
+            "--connect-timeout",
+            str(connect_timeout),
+            "--max-time",
+            str(connect_timeout + read_timeout),
+            "--max-filesize",
+            str(BODY_LIMIT),
+            "--output",
+            str(body_path),
+            "--dump-header",
+            str(headers_path),
+            "--write-out",
+            "%{http_code}",
+            str(httpx.URL(url, params=params)),
+        ]
+        try:
+            result = subprocess.run(
+                command, capture_output=True, timeout=connect_timeout + read_timeout + 5, check=False
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return Response(None, None, None, f"CurlError: {exc}", now())
+        headers = {}
+        if headers_path.exists():
+            for line in headers_path.read_text(errors="replace").splitlines():
+                if line.startswith("HTTP/"):
+                    headers.clear()
+                elif ":" in line:
+                    name, value = line.split(":", 1)
+                    headers[name.lower()] = value.strip()
+        body = None
+        if body_path.exists():
+            with body_path.open("rb") as stream:
+                body = stream.read(BODY_LIMIT + 1)
+        status_text = result.stdout.decode(errors="replace").strip()
+        status = int(status_text) if status_text.isdecimal() and status_text != "000" else None
+        error = None
+        if result.returncode == 63 or (body is not None and len(body) > BODY_LIMIT):
+            error = "response_too_large"
+            body = body[:BODY_LIMIT] if body is not None else None
+        elif result.returncode:
+            error = f"CurlError({result.returncode}): {result.stderr.decode(errors='replace').strip()[:2000]}"
+        elif status is None:
+            error = "CurlError: No HTTP status received"
+        return Response(status, headers.get("content-type"), body, error, now(), headers.get("retry-after"))
 
 
 def available_budget(db, units, *, metadata=False):
@@ -190,22 +253,68 @@ def retry_at(response, attempt_no):
     return response.fetched_at + timedelta(seconds=delay)
 
 
-def capture(client, slice_):
+def capture(client, slice_, use_curl=False):
     requested_at = now()
-    return requested_at, fetch(client, slice_["product"]["url"], slice_["params"])
+    fetcher = fetch_curl if use_curl else fetch
+    return requested_at, fetcher(client, slice_["product"]["url"], slice_["params"])
 
 
-def work(db, client, *, max_requests=20, max_attempts=3, workers=4):
+def work(
+    db,
+    client,
+    *,
+    max_requests=20,
+    max_attempts=3,
+    workers=4,
+    wait=False,
+    retry_failed=False,
+    http_backend="httpx",
+    max_wait=60,
+):
+    if http_backend not in {"httpx", "curl", "auto"}:
+        raise ValueError("HTTP backend must be httpx, curl, or auto")
+    if http_backend == "curl" and shutil.which("curl") is None:
+        raise ValueError("The curl HTTP backend requires curl on PATH")
+    results = []
+    requests = 0
+    while True:
+        completed, used = work_batch(
+            db,
+            client,
+            max_requests=max_requests - requests,
+            max_attempts=max_attempts,
+            workers=workers,
+            retry_failed=retry_failed,
+            http_backend=http_backend,
+        )
+        results.extend(completed)
+        requests += used
+        if not wait or requests >= max_requests:
+            break
+        retry = db.execute("""
+            SELECT min(not_before_at) FROM ops.extraction_slice WHERE status = 'retryable'
+        """).fetchone()[0]
+        if retry is None:
+            break
+        delay = max(0, (retry - now()).total_seconds())
+        if delay > max_wait:
+            break
+        time.sleep(delay)
+        max_wait -= delay
+    return results
+
+
+def work_batch(db, client, *, max_requests, max_attempts, workers, retry_failed, http_backend):
     from .silver import horizon_end, normalize, unavailable
 
     ids = db.execute(
         """
         SELECT slice_id FROM ops.extraction_slice
-        WHERE status IN ('queued', 'deferred_quota', 'retryable', 'landed')
+        WHERE (status IN ('queued', 'deferred_quota', 'retryable', 'landed') OR (? AND status = 'failed'))
           AND (not_before_at IS NULL OR not_before_at <= ? OR status = 'landed')
         ORDER BY priority, window_start, slice_key
     """,
-        [now()],
+        [retry_failed, now()],
     ).fetchall()
     results = []
     requests = 0
@@ -255,6 +364,14 @@ def work(db, client, *, max_requests=20, max_attempts=3, workers=4):
                 ).fetchone()[0]
                 results.append((slice_id, normalize(db, slice_, fetch_id)))
                 continue
+            latest = db.execute(
+                f"SELECT http_status, fetch_error FROM {table} WHERE slice_id = ? ORDER BY attempt_no DESC LIMIT 1",
+                [slice_id],
+            ).fetchone()
+            if slice_["status"] == "failed" and not (
+                latest and (latest[0] in RETRYABLE or (latest[1] and latest[1] != "response_too_large"))
+            ):
+                continue
             names = list(slice_["fields"].values())
             if names and all(rule.get("support", "supported") != "supported" for rule in names):
                 reason = "unverified" if any(rule.get("support") == "unverified" for rule in names) else "unsupported"
@@ -279,11 +396,21 @@ def work(db, client, *, max_requests=20, max_attempts=3, workers=4):
                 results.append((slice_id, unavailable(db, slice_, "deferred_quota")))
                 continue
             requests += 1
-            pending.append((slice_, fetch_id, count, pool.submit(capture, client, slice_)))
+            connection_failure = (
+                latest
+                and latest[1]
+                and latest[1].startswith(
+                    ("ConnectTimeout", "ConnectError", "ReadTimeout", "ReadError", "RemoteProtocolError", "CurlError")
+                )
+            )
+            use_curl = http_backend == "curl" or (
+                http_backend == "auto" and connection_failure and shutil.which("curl") is not None
+            )
+            pending.append((slice_, fetch_id, count, pool.submit(capture, client, slice_, use_curl)))
             if len(pending) == workers:
                 drain()
         drain()
-    return results
+    return results, requests
 
 
 def metadata_time(value):

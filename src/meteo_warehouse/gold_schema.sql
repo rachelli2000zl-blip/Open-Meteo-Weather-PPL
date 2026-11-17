@@ -120,6 +120,69 @@ JOIN silver.request_profile rp USING (profile_id)
 JOIN silver.vintage v USING (vintage_id)
 LEFT JOIN silver.source_point sp USING (source_point_id);
 
+CREATE OR REPLACE VIEW gold.forecast_temperature_validation AS
+WITH selected_releases AS (
+    SELECT r.*
+    FROM gold.forecast_release r
+    JOIN ops.gold_build b USING (build_id)
+    WHERE b.contract_name = 'single_run_forecast' AND r.contract_version = 'v2'
+      AND r.initialized_at IS NOT NULL
+    QUALIFY row_number() OVER (
+        PARTITION BY r.site_id, r.product_id, r.requested_model_selector, r.profile_id, r.initialized_at
+        ORDER BY r.published_at DESC, r.release_id DESC
+    ) = 1
+), forecasts AS (
+    SELECT r.release_id, r.site_id, r.profile_id, f.location_key,
+           r.requested_model_selector AS forecast_model, r.initialized_at,
+           r.published_at AS forecast_published_at, i.valid_at,
+           epoch(i.valid_at - r.initialized_at) / 3600 AS lead_hours,
+           f.value_number AS forecast_temp_c
+    FROM selected_releases r
+    JOIN gold.release_input i USING (release_id)
+    JOIN gold.series_values f
+      ON (f.series_id, f.vintage_id, f.valid_at, f.revision_no) =
+         (i.series_id, i.vintage_id, i.valid_at, i.revision_no)
+    WHERE f.measure_code = 'temperature_2m' AND f.definition_version = 1
+      AND f.canonical_unit = '°C' AND f.block_code = 'hourly'
+      AND i.valid_at >= r.window_start AND i.valid_at < r.window_end
+), reference_revisions AS (
+    SELECT f.site_id, f.profile_id, f.valid_at, f.series_id, f.vintage_id, f.revision_no,
+           f.value_number, f.quality_status, f.window_start, f.window_end, f.warehouse_available_at
+    FROM gold.series_values f
+    JOIN (SELECT DISTINCT site_id, profile_id, valid_at FROM forecasts) t
+      USING (site_id, profile_id, valid_at)
+    WHERE f.api_product = 'archive' AND f.requested_model_selector = 'era5'
+      AND f.measure_code = 'temperature_2m' AND f.definition_version = 1
+      AND f.canonical_unit = '°C' AND f.block_code = 'hourly' AND f.output_cadence = 3600
+      AND f.member_kind = 'deterministic' AND f.vintage_kind = 'archive'
+      AND f.scenario_code IS NULL AND f.fixed_lead_hours IS NULL
+    QUALIFY row_number() OVER (
+        PARTITION BY f.series_id, f.vintage_id, f.valid_at ORDER BY f.revision_no DESC
+    ) = 1
+), reference_values AS (
+    SELECT site_id, profile_id, valid_at,
+           CASE WHEN count(*) = 1 AND bool_and(
+               quality_status = 'valid' AND value_number IS NOT NULL
+               AND window_start = valid_at AND window_end = valid_at
+           ) THEN max(value_number) END AS reference_temp_c,
+           CASE WHEN count(*) > 1 THEN 'ambiguous'
+                WHEN bool_and(quality_status = 'valid' AND value_number IS NOT NULL
+                              AND window_start = valid_at AND window_end = valid_at) THEN 'complete'
+                ELSE 'unusable' END AS reference_status,
+           CASE WHEN count(*) = 1 THEN max(series_id) END AS reference_series_id,
+           CASE WHEN count(*) = 1 THEN max(vintage_id) END AS reference_vintage_id,
+           CASE WHEN count(*) = 1 THEN max(revision_no) END AS reference_revision_no,
+           CASE WHEN count(*) = 1 THEN max(warehouse_available_at) END AS reference_loaded_at
+    FROM reference_revisions
+    GROUP BY site_id, profile_id, valid_at
+)
+SELECT f.*, r.reference_temp_c, f.forecast_temp_c - r.reference_temp_c AS error_c,
+       abs(f.forecast_temp_c - r.reference_temp_c) AS absolute_error_c,
+       coalesce(r.reference_status, 'missing') AS reference_status,
+       r.reference_series_id, r.reference_vintage_id, r.reference_revision_no, r.reference_loaded_at
+FROM forecasts f
+LEFT JOIN reference_values r USING (site_id, profile_id, valid_at);
+
 CREATE TABLE IF NOT EXISTS ops.gold_refresh (
     contract_name VARCHAR, contract_version VARCHAR, processed_through TIMESTAMPTZ NOT NULL,
     PRIMARY KEY (contract_name, contract_version),

@@ -33,6 +33,25 @@ def parser():
     worker.add_argument("--max-requests", default=20, type=positive)
     worker.add_argument("--max-attempts", default=3, type=positive)
     worker.add_argument("--workers", default=4, type=positive)
+    worker.add_argument(
+        "--wait",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Wait up to 60 seconds of backoff for retries (default: enabled)",
+    )
+    worker.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help="Retry transient failures below --max-attempts, including previously exhausted slices",
+    )
+    worker.add_argument(
+        "--http-backend",
+        choices=("auto", "httpx", "curl"),
+        default="auto",
+        help="auto switches to curl after a connection failure when curl is installed",
+    )
+    worker.add_argument("--connect-timeout", default=25, type=positive, help="Connection timeout in seconds")
+    worker.add_argument("--read-timeout", default=60, type=positive, help="Read timeout in seconds")
     model = commands.add_parser("poll", help="Poll a model and schedule new slices")
     model.add_argument("job")
     ingest = commands.add_parser("ingest", help="Land and normalize saved HTTP response bytes")
@@ -107,7 +126,16 @@ def run(args, db):
             show({"status": status, "slice_ids": ids})
             return 2 if status in {"invalid", "deferred_quota"} else 0
         elif command == "refresh":
-            show(refresh(db, config, args.contract))
+            result = refresh(db, config, args.contract)
+            show(result)
+            return (
+                2
+                if any(
+                    isinstance(output, dict) and output.get("status") in {"no_input", "ineligible", "superseded"}
+                    for output in result.values()
+                )
+                else 0
+            )
         else:
             result = publish(
                 db,
@@ -126,12 +154,41 @@ def run(args, db):
     elif command == "snapshot":
         show(snapshot(db, args.output))
     elif command == "work":
-        with httpx.Client(timeout=25) as client:
+        with httpx.Client(timeout=httpx.Timeout(args.read_timeout, connect=args.connect_timeout)) as client:
             results = work(
-                db, client, max_requests=args.max_requests, max_attempts=args.max_attempts, workers=args.workers
+                db,
+                client,
+                max_requests=args.max_requests,
+                max_attempts=args.max_attempts,
+                workers=args.workers,
+                wait=args.wait,
+                retry_failed=args.retry_failed,
+                http_backend=args.http_backend,
             )
-        show([{"slice_id": slice_id, "status": status} for slice_id, status in results])
-        return 2 if any(status in {"failed", "invalid", "partial", "deferred_quota"} for _, status in results) else 0
+        output = []
+        for slice_id in dict(results):
+            slice_ = get_slice(db, slice_id)
+            row = {"slice_id": slice_id, "status": slice_["status"]}
+            if slice_["status"] != "complete":
+                attempt = db.execute(
+                    f"SELECT attempt_no, http_status, fetch_error FROM bronze.{slice_['category']} "
+                    "WHERE slice_id = ? ORDER BY attempt_no DESC LIMIT 1",
+                    [slice_id],
+                ).fetchone()
+                row.update(not_before_at=slice_["not_before"])
+                if attempt:
+                    row.update(attempts=attempt[0], http_status=attempt[1], fetch_error=attempt[2])
+                if slice_["status"] == "failed" and attempt and attempt[0] >= args.max_attempts:
+                    row["retry_hint"] = (
+                        "Use work --retry-failed with a higher --max-attempts limit after checking the connection."
+                    )
+            output.append(row)
+        show(output)
+        return (
+            2
+            if any(row["status"] in {"failed", "retryable", "invalid", "partial", "deferred_quota"} for row in output)
+            else 0
+        )
     elif command in {"ingest", "replay"}:
         slice_ = get_slice(db, args.slice_id)
         fetch_id = args.fetch_id

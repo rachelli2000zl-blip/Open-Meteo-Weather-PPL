@@ -151,6 +151,67 @@ class WarehouseTest(unittest.TestCase):
             [(10.0,), (10.0,)],
         )
 
+    def test_historical_validation_pins_forecasts_and_checks_latest_matching_reference(self):
+        forecast = self.plan("single_runs", run=BASE)
+        values = forecast_sample()
+        values["temperature_2m"] = [10, 12]
+        self.capture(forecast, hourly(TARGET, values))
+        release = publish(self.db, self.config, "single_run_forecast", TARGET, TARGET + 2 * HOUR)
+        query = """
+            SELECT forecast_temp_c, reference_temp_c, error_c, reference_status, reference_revision_no
+            FROM gold.forecast_temperature_validation ORDER BY valid_at
+        """
+        self.assertEqual(
+            self.db.execute(query).fetchall(), [(10, None, None, "missing", None), (12, None, None, "missing", None)]
+        )
+
+        self.config["jobs"]["validation_reference"]["params"] = {"cell_selection": "nearest"}
+        other_profile = self.plan("validation_reference")
+        self.capture(other_profile, hourly(TARGET, {"temperature_2m": [40, 40]}))
+        self.assertEqual(
+            self.db.execute(query).fetchall(), [(10, None, None, "missing", None), (12, None, None, "missing", None)]
+        )
+        del self.config["jobs"]["validation_reference"]["params"]
+
+        reference = self.plan("validation_reference")
+        self.capture(reference, hourly(TARGET, {"temperature_2m": [9, 10]}), fetched=BASE + HOUR)
+        self.assertEqual(self.db.execute(query).fetchall(), [(10, 9, 1, "complete", 1), (12, 10, 2, "complete", 1)])
+        self.assertEqual(
+            self.db.execute("""
+            SELECT count(error_c), avg(absolute_error_c), avg(error_c * error_c), avg(error_c)
+            FROM gold.forecast_temperature_validation
+        """).fetchone(),
+            (2, 1.5, 2.5, 1.5),
+        )
+
+        values["temperature_2m"] = [20, 22]
+        self.capture(
+            forecast,
+            hourly(TARGET, values),
+            fetched=BASE + 2 * HOUR,
+            evidence=(BASE + 2 * HOUR, "test forecast correction", True),
+        )
+        self.assertEqual(self.db.execute(query).fetchall(), [(10, 9, 1, "complete", 1), (12, 10, 2, "complete", 1)])
+        self.capture(
+            reference,
+            hourly(TARGET, {"temperature_2m": [None, 11]}),
+            fetched=BASE + 3 * HOUR,
+            evidence=(BASE + 3 * HOUR, "test reference correction", True),
+        )
+        self.assertEqual(
+            self.db.execute(query).fetchall(), [(10, None, None, "unusable", 2), (12, 11, 1, "complete", 2)]
+        )
+
+        updated = publish(self.db, self.config, "single_run_forecast", TARGET, TARGET + 2 * HOUR)
+        self.assertNotEqual(updated["release_id"], release["release_id"])
+        self.assertEqual(
+            self.db.execute(query).fetchall(), [(20, None, None, "unusable", 2), (22, 11, 11, "complete", 2)]
+        )
+        self.assertEqual(
+            self.db.execute("SELECT DISTINCT release_id FROM gold.forecast_temperature_validation").fetchall(),
+            [(updated["release_id"],)],
+        )
+
     def test_worker_waits_before_retrying_transient_failures(self):
         failures = [
             ("seconds", httpx.Response(503, headers={"Retry-After": "7"}), 7),

@@ -258,6 +258,18 @@ start = 2023-01-01
 end = 2026-01-01
 fields = ["temperature_2m_min", "temperature_2m_max"]
 
+[jobs.validation_reference]
+product = "archive"
+mode = "archive"
+selector = "era5"
+selector_kind = "model"
+sites = ["berlin"]
+block = "hourly"
+start = 2026-11-10T01:00:00Z
+end = 2026-11-11T01:00:00Z
+fields = ["temperature_2m"]
+request_profile = "utc_hourly"
+
 [jobs.previous_runs]
 product = "previous_runs"
 mode = "archive"
